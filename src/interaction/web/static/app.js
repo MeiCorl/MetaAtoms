@@ -1,0 +1,4424 @@
+/* ============================================================================
+ * MetaAtoms Web · Frontend Logic
+ * 模块：WS 客户端、消息路由、Markdown 渲染、/ 命令下拉、状态栏、错误卡片。
+ * 不引入构建工具，原生 ES2020 即可运行；通过 marked 库做 Markdown 渲染。
+ * ========================================================================== */
+
+(() => {
+    'use strict';
+
+    const APP_ICON_SRC = '/metaatoms-icon.png?v=20260731-metaatoms-icon';
+
+    // ---- DOM 缓存 ----
+    const $ = (id) => document.getElementById(id);
+    const dom = {
+        loading:        $('loading'),
+        versionBadge:   $('version-badge'),
+        statusText:     $('agent-status-text'),
+        statusDot:      $('agent-status-dot'),
+        newSessionBtn:  $('new-session-btn'),
+        sessionList:    $('session-list'),
+        sessionTitle:   $('current-session-title'),
+        sessionMeta:    $('current-session-meta'),
+        messages:       $('messages'),
+        input:          $('input'),
+        charCount:      $('char-count'),
+        modelName:      $('model-name'),
+        ctxPercent:     $('ctx-percent'),
+        ctxBar:         null,            // 渲染时按需创建
+        sendBtn:        $('send-btn'),
+        // Step 4：System Prompt 可观测性
+        spTokens:       $('sp-tokens'),
+        spBreakdown:    $('sp-breakdown'),
+        // Step 8：MCP 健康状态
+        mcpStat:        $('mcp-stat'),
+        mcpSummary:     $('mcp-summary'),
+        mcpDots:        $('mcp-dots'),
+        mcpTooltip:     $('mcp-tooltip'),
+        // Step 7：压缩按钮 + 计数 + toast
+        compactBtn:     $('compact-btn'),
+        compactValue:   $('compact-stat-value'),
+        toastContainer: $('toast-container'),
+        // Step 4：开发者模式面板
+        devPanel:       $('dev-panel'),
+        devExportBtn:   $('dev-export-sp-btn'),
+        devPanelClose:  $('dev-panel-close'),
+        // Step 4：SP 导出模态框
+        spModal:        $('sp-modal'),
+        spModalSummary: $('sp-modal-summary'),
+        spModalSystem:  $('sp-modal-system'),
+        spModalLead:    $('sp-modal-lead'),
+        spModalStats:   $('sp-modal-stats'),
+        // 亮色 / 暗色 主题切换按钮：紧贴就绪状态右侧，点击翻转 data-theme
+        themeToggle:    $('theme-toggle'),
+        userMenu:       $('user-menu'),
+        userMenuButton: $('user-menu-button'),
+        userAvatar:     $('user-avatar'),
+        userNickname:   $('user-nickname'),
+        userMenuPanel:  $('user-menu-panel'),
+        userMenuAvatar: $('user-menu-avatar'),
+        userMenuName:   $('user-menu-name'),
+        userMenuEmail:  $('user-menu-email'),
+        userMenuUID:    $('user-menu-uid'),
+        userLogoutBtn:  $('user-logout-btn'),
+        // Step 1.5 Task 4：右侧用户文件栏 DOM 引用
+        projectPanel:        $('project-file-panel'),
+        projectRefreshBtn:   $('project-refresh-btn'),
+        projectPanelCount:   $('project-panel-count'),
+        projectCurrentPath:  $('project-current-path'),
+        projectBreadcrumbs:  $('project-breadcrumbs'),
+        projectTruncated:    $('project-panel-truncated'),
+        projectLoading:      $('project-panel-loading'),
+        projectEmpty:        $('project-panel-empty'),
+        projectError:        $('project-panel-error'),
+        projectErrorText:    $('project-panel-error-text'),
+        projectFileList:     $('project-file-list'),
+        projectFileModal:    $('project-file-modal'),
+        projectFileModalTitle: $('project-file-modal-title'),
+        projectFileModalPath:  $('project-file-modal-path'),
+        projectFileModalSize:  $('project-file-modal-size'),
+        projectFileModalType:  $('project-file-modal-type'),
+        projectFileModalLanguage: $('project-file-modal-language'),
+        projectFileModalBody:  $('project-file-modal-body'),
+        projectTabButtons:     Array.from(document.querySelectorAll('[data-project-tab]')),
+        projectTabPanels:      Array.from(document.querySelectorAll('[data-project-tab-panel]')),
+        projectGitRefreshBtn:  $('project-git-refresh-btn'),
+        projectGitCount:       $('project-git-count'),
+        projectGitStatusDot:   document.querySelector('.project-git-status-dot'),
+        projectGitStatusText:  $('project-git-status-text'),
+        projectGitLoading:     $('project-git-loading'),
+        projectGitEmpty:       $('project-git-empty'),
+        projectGitError:       $('project-git-error'),
+        projectGitErrorText:   $('project-git-error-text'),
+        projectGitList:        $('project-git-list'),
+        projectSearchForm:     $('project-search-form'),
+        projectSearchQuery:    $('project-search-query'),
+        projectSearchPath:     $('project-search-path'),
+        projectSearchRegex:    $('project-search-regex'),
+        projectSearchExclude:  $('project-search-exclude'),
+        projectSearchRunBtn:   $('project-search-run-btn'),
+        projectSearchSummary:  $('project-search-summary'),
+        projectSearchLoading:  $('project-search-loading'),
+        projectSearchEmpty:    $('project-search-empty'),
+        projectSearchError:    $('project-search-error'),
+        projectSearchErrorText: $('project-search-error-text'),
+        projectSearchResults:  $('project-search-results'),
+    };
+
+    // ---- 全局状态 ----
+    const state = {
+        ws: null,
+        wsReady: false,
+        wsReconnectAttempts: 0,
+        wsReconnectTimer: null,
+        wsMaxReconnectAttempts: 10,
+        wsReconnectIntervalMs: 3000,
+
+        sessionId: null,
+        messages: [],                  // [{ role, content, tool_call? }]  与 DOM 镜像
+        agentStatus: 'idle',           // idle | thinking | tool_running | error
+        ctx: { used: 0, limit: 100, percentLeft: 100 },
+        modelName: '--',
+        currentUser: null,
+        streaming: false,              // 当前是否有流式响应进行中
+        expectingAssistant: false,     // 用户刚发了消息，正在等待 assistant 首个 chunk
+        slashOpen: false,
+        slashIndex: 0,
+        slashItems: [],
+        userScrolledUp: false,         // 用户向上滚动后停止自动滚动
+        sessionsTableActive: false,    // /sessions 表格视图是否启用（true 时 session_list 响应会渲染表格）
+        _toolById: {},                 // tool_use_id -> DOM 节点，用于 end 事件定位
+        _suppressedToolById: {},       // tool_use_id -> true for specialized UI calls hidden from generic tool cards
+        _memoryReviewById: {},         // review_id -> DOM 节点，用于自动记忆事件定位
+        _subAgentById: {},             // task_id -> DOM node for SubAgent call cards
+        _activeSubAgentIds: {},        // task_id -> true while a SubAgent is queued/running
+        // Step 1.4：file_diff 单次回包按 tool_use_id 路由到对应弹窗回调。
+        // 每个 callback 自行处理「找到/没找到/超时」，处理完即从 map 移除。
+        _fileDiffCallbacks: {},        // tool_use_id -> { resolve, timer, modal }
+        // Step 7：累计第一层轻量替换的工具结果数（状态栏小标记，切换会话重置）
+        compactLightCount: 0,
+        // Step 9.1：后端下发的 slash 命令清单。
+        // 元素形态 { name, description, needs_arg, arg_hint, category }。
+        commands: [],
+        // Step 9.1：name -> MsgType 映射，自动从后端下发的命令清单构造。
+        // - /new -> new_session；/clear -> clear_session；/compact -> compact
+        // - /resume 因 needs_arg=true 由前端特殊处理（不进入 map，补全到输入框）
+        // - /sessions 因 category="client" 由前端走本地 openSessionsTable（不进入 map）
+        // - 后续 Skill 系统注册的命令若不在内置映射表中，前端按"未知命令"兜底
+        commandTypeByName: {},
+        // Step 1.5 Task 4：用户文件栏目录状态。
+        projectDirPath: '',
+        projectDirPending: null,        // { seq, path }，用于过滤旧回包
+        projectDirSeq: 0,
+        projectDirEntriesCache: {},     // path -> entries
+        projectDirLoading: false,
+        projectFilePending: null,       // { seq, path, timer } - filters stale file preview responses
+        projectFileSeq: 0,
+        projectActiveTab: 'files',
+        projectGitLoaded: false,
+        projectGitPending: null,
+        projectGitSeq: 0,
+        projectGitDiffPending: null,
+        projectGitDiffSeq: 0,
+        projectSearchPending: null,
+        projectSearchSeq: 0,
+        projectPanelBound: false,
+    };
+
+    // ---- / 快捷命令清单 ----
+    // Step 9.1：硬编码数组已删除，命令清单由后端 slash Registry 启动时通过
+    // `slash_commands` WebSocket 消息下发，前端存到 state.commands 中并构造
+    // state.commandTypeByName(name -> MsgType) 映射用于执行。
+    // Category="client" 的命令（/sessions）由前端识别后走本地逻辑（openSessionsTable）。
+    // NeedsArg=true 的命令（/resume）选中后补全到输入框，用户填参数后按 Enter 提交。
+
+    // ---- 工具函数 ----
+    const escapeHTML = (s) => String(s ?? '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+    function userInitials(name, email) {
+        const src = String(name || email || '').trim();
+        if (!src) return '--';
+        const parts = src.split(/\s+/).filter(Boolean);
+        if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+        return src.slice(0, 2).toUpperCase();
+    }
+
+    function renderCurrentUser(user) {
+        const nickname = String(user?.nickname || '').trim() || '未登录';
+        const email = String(user?.email || '').trim() || '--';
+        const uid = String(user?.user_id || '').trim() || '--';
+        const initials = userInitials(nickname, email);
+
+        if (dom.userMenu) dom.userMenu.dataset.loaded = user ? 'true' : 'false';
+        if (dom.userNickname) dom.userNickname.textContent = nickname;
+        if (dom.userAvatar) dom.userAvatar.textContent = initials;
+        if (dom.userMenuAvatar) dom.userMenuAvatar.textContent = initials;
+        if (dom.userMenuName) dom.userMenuName.textContent = nickname;
+        if (dom.userMenuEmail) dom.userMenuEmail.textContent = email;
+        if (dom.userMenuUID) dom.userMenuUID.textContent = uid;
+    }
+
+    async function loadCurrentUser() {
+        try {
+            const res = await fetch('/api/me', {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' },
+            });
+            if (!res.ok) {
+                state.currentUser = null;
+                renderCurrentUser(null);
+                return;
+            }
+            const user = await res.json();
+            state.currentUser = user;
+            renderCurrentUser(user);
+        } catch (err) {
+            console.warn('current user load failed', err);
+            state.currentUser = null;
+            renderCurrentUser(null);
+        }
+    }
+
+    function toggleUserMenu(force) {
+        if (!dom.userMenu || !dom.userMenuButton || !dom.userMenuPanel) return;
+        const willOpen = force === undefined ? dom.userMenuPanel.hidden : !!force;
+        dom.userMenuPanel.hidden = !willOpen;
+        dom.userMenu.classList.toggle('is-open', willOpen);
+        dom.userMenuButton.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+        if (willOpen) {
+            setTimeout(() => {
+                document.addEventListener('click', onDocClickCloseUserMenu);
+                document.addEventListener('keydown', onEscCloseUserMenu);
+            }, 0);
+        } else {
+            document.removeEventListener('click', onDocClickCloseUserMenu);
+            document.removeEventListener('keydown', onEscCloseUserMenu);
+        }
+    }
+
+    function onDocClickCloseUserMenu(e) {
+        if (dom.userMenu && !dom.userMenu.contains(e.target)) {
+            toggleUserMenu(false);
+        }
+    }
+
+    function onEscCloseUserMenu(e) {
+        if (e.key === 'Escape') {
+            toggleUserMenu(false);
+        }
+    }
+
+    async function logoutCurrentUser() {
+        if (dom.userLogoutBtn) {
+            dom.userLogoutBtn.disabled = true;
+            dom.userLogoutBtn.textContent = 'Logging out...';
+        }
+        try {
+            const res = await fetch('/api/logout', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' },
+            });
+            if (res.ok || res.status === 401) {
+                location.reload();
+                return;
+            }
+            throw new Error('logout failed');
+        } catch (err) {
+            console.warn('logout failed', err);
+            if (dom.userLogoutBtn) {
+                dom.userLogoutBtn.disabled = false;
+                dom.userLogoutBtn.textContent = 'Logout';
+            }
+            showCompactionToast('Logout failed', 'error');
+        }
+    }
+
+    function bindUserMenu() {
+        renderCurrentUser(null);
+        if (dom.userMenuButton) {
+            dom.userMenuButton.addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleUserMenu();
+            });
+        }
+        if (dom.userLogoutBtn) {
+            dom.userLogoutBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                logoutCurrentUser();
+            });
+        }
+    }
+
+    const formatTime = (iso) => {
+        try {
+            const d = new Date(iso);
+            const now = new Date();
+            const sameDay = d.toDateString() === now.toDateString();
+            if (sameDay) {
+                return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+            }
+            return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+        } catch { return '--'; }
+    };
+
+    // =========================================================================
+    // WebSocket 客户端
+    // =========================================================================
+
+    function wsURL() {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return `${proto}//${location.host}/ws`;
+    }
+
+    function connectWS() {
+        if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) {
+            return;
+        }
+        try {
+            state.ws = new WebSocket(wsURL());
+        } catch (err) {
+            console.error('WebSocket 创建失败', err);
+            scheduleReconnect();
+            return;
+        }
+
+        state.ws.addEventListener('open', onWSOpen);
+        state.ws.addEventListener('message', onWSMessage);
+        state.ws.addEventListener('close', onWSClose);
+        state.ws.addEventListener('error', (e) => console.warn('WebSocket 错误', e));
+    }
+
+    function onWSOpen() {
+        state.wsReady = true;
+        state.wsReconnectAttempts = 0;
+        hideLoading();
+        // Connected: refresh sessions and reload the project root for this socket.
+        sendWS(MsgType.ListSessions, {});
+        sendWS(MsgType.GetCurrentSession, {});
+        requestProjectDir('', { force: true });
+        if (state.projectActiveTab === 'git') {
+            requestProjectGitChanges({ force: true });
+        }
+    }
+
+    function onWSClose() {
+        state.wsReady = false;
+        state.projectDirPending = null;
+        setProjectDirLoading(false);
+        showProjectDirError('连接已断开，重连后可刷新用户文件。');
+        handleProjectFileConnectionClosed();
+        handleProjectSidebarConnectionClosed();
+        showLoading('连接已断开，正在重连...');
+        scheduleReconnect();
+    }
+
+    function scheduleReconnect() {
+        if (state.wsReconnectTimer) return;
+        if (state.wsReconnectAttempts >= state.wsMaxReconnectAttempts) {
+            showLoading('无法连接到 MetaAtoms 服务，请检查后端是否运行');
+            return;
+        }
+        state.wsReconnectAttempts += 1;
+        const delay = state.wsReconnectIntervalMs;
+        state.wsReconnectTimer = setTimeout(() => {
+            state.wsReconnectTimer = null;
+            connectWS();
+        }, delay);
+    }
+
+    function sendWS(type, payload) {
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+            console.warn('WebSocket 未连接，消息丢弃:', type);
+            return false;
+        }
+        try {
+            state.ws.send(JSON.stringify({ type, payload }));
+            return true;
+        } catch (err) {
+            console.error('WebSocket 发送失败', err);
+            return false;
+        }
+    }
+
+    function onWSMessage(ev) {
+        let msg;
+        try { msg = JSON.parse(ev.data); }
+        catch (err) { console.error('消息 JSON 解析失败', err, ev.data); return; }
+        if (!msg || !msg.type) return;
+        handleServerMessage(msg);
+    }
+
+    // ---- 消息类型常量（与服务端 protocol.go 一致） ----
+    const MsgType = {
+        UserInput:         'user_input',
+        ListSessions:      'list_sessions',
+        NewSession:        'new_session',
+        ResumeSession:     'resume_session',
+        AbortStream:       'abort_stream',
+        GetCurrentSession: 'get_current_session',
+        ClearSession:      'clear_session',
+        DeleteSession:     'delete_session',
+        StreamChunk:       'stream_chunk',
+        StreamDone:        'stream_done',
+        StreamError:       'stream_error',
+        SessionList:       'session_list',
+        SessionLoaded:     'session_loaded',
+        SessionDeleted:    'session_deleted',
+        StatusUpdate:      'status_update',
+        ContextUsage:      'context_usage',
+        ToolCallStart:     'tool_call_start',
+        ToolCallEnd:       'tool_call_end',
+        DevExportSP:       'dev_export_sp',
+        // Step 1.4：查看改动弹窗用
+        GetFileDiff:       'get_file_diff',
+        FileDiff:          'file_diff',
+        // Step 1.5：用户文件栏目录浏览与文件预览协议
+        ListProjectDir:    'list_project_dir',
+        ProjectDir:        'project_dir',
+        ReadProjectFile:   'read_project_file',
+        ProjectFile:       'project_file',
+        ListProjectGitChanges: 'list_project_git_changes',
+        ProjectGitChanges: 'project_git_changes',
+        ReadProjectGitDiff: 'read_project_git_diff',
+        ProjectGitDiff:    'project_git_diff',
+        SearchProject:     'search_project',
+        ProjectSearch:     'project_search',
+        // Step 8：MCP server 健康状态推送
+        MCPStatus:        'mcp_status',
+        // Step 7：上下文压缩（手动触发 + 事件推送）
+        Compact:          'compact',
+        CompactionEvent:  'compaction_event',
+        MemoryReviewEvent: 'memory_review_event',
+        // Step 9.1：slash 命令清单相关消息
+        // ListSlashCommands 由前端发出（重连兜底），SlashCommands / SlashCommandsUpdated
+        // 由后端在 ws 建立时主动推送 / 命令清单变化时推送。
+        ListSlashCommands:      'list_slash_commands',
+        SlashCommands:          'slash_commands',
+        SlashCommandsUpdated:   'slash_commands_updated',
+        // Step 10 Task 6：/skills 模态框
+        // ListSkills 由前端发出（/skills 命令触发），SkillsList 由后端回推三档分组数据。
+        ListSkills:             'list_skills',
+        SkillsList:             'skills_list',
+        // Step 12：SubAgent 后台任务生命周期事件
+        SubAgentCallStart:     'subagent_call_start',
+        SubAgentStatusUpdate:  'subagent_status_update',
+        SubAgentResult:        'subagent_result',
+        // Step 10：通用 slash 命令执行入口（覆盖 Skill 系统 /<skill-name> 等无专属 MsgType 的命令）
+        // 前端在「下拉选中」与「输入框直接键入」两条路径都通过本消息触发后端 Execute。
+        SlashCommand:           'slash_command',
+    };
+
+    // abortMarker 与后端 agent_loop.go 中的 abortMarker 常量保持一致，
+    // 用于用户主动取消回复时的视觉标记文本
+    const abortMarker = '[用户取消了回复]';
+
+    // escapeHtml 把字符串中的 & < > " ' 转义为 HTML 实体，避免
+    // 把后端返回的 Source 名称当作 HTML 解释（XSS 防护）。
+    function escapeHtml(s) {
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    // ---- 工具名 → 短缩写（图标方块字符）。未知工具回退到 '⚙' ----
+    const TOOL_ICON = {
+        read_file:    '📖',
+        write_file:   '✏',
+        bash:         '$_',
+        glob:         '*',
+        grep:         '⌕',
+    };
+    const TOOL_ICON_FALLBACK = '⚙';
+
+    // ---- 状态徽章文案映射（与服务端 ToolCallStatus* 一致） ----
+    const TOOL_STATUS_LABEL = {
+        running:   'running',
+        completed: 'done',
+        error:     'failed',
+        aborted:   'aborted',
+        timeout:   'timeout',
+    };
+
+    const SUPPRESSED_TOOL_DISPLAY_NAMES = new Set(['agent']);
+
+    function shouldSuppressToolCallDisplay(name) {
+        return SUPPRESSED_TOOL_DISPLAY_NAMES.has(String(name || '').toLowerCase());
+    }
+
+    const SUBAGENT_STATUS_LABEL = {
+        queued:    'queued',
+        running:   'running',
+        completed: 'done',
+        failed:    'failed',
+        canceled:  'canceled',
+    };
+
+    // =========================================================================
+    // 服务端消息分发
+    // =========================================================================
+
+    function handleServerMessage(msg) {
+        switch (msg.type) {
+            case MsgType.StatusUpdate:    return onStatusUpdate(msg.payload);
+            case MsgType.StreamChunk:     return onStreamChunk(msg.payload);
+            case MsgType.StreamDone:      return onStreamDone(msg.payload);
+            case MsgType.StreamError:     return onStreamError(msg.payload);
+            case MsgType.SessionList:     return onSessionList(msg.payload);
+            case MsgType.SessionLoaded:   return onSessionLoaded(msg.payload);
+            case MsgType.SessionDeleted:  return onSessionDeleted(msg.payload);
+            case MsgType.ContextUsage:    return onContextUsage(msg.payload);
+            case MsgType.ToolCallStart:   return onToolCallStart(msg.payload);
+            case MsgType.ToolCallEnd:     return onToolCallEnd(msg.payload);
+            case MsgType.DevExportSP:     return onDevExportSP(msg.payload);
+            case MsgType.FileDiff:          return onFileDiff(msg.payload);
+            case MsgType.ProjectDir:        return onProjectDir(msg.payload);
+            case MsgType.ProjectFile:       return onProjectFile(msg.payload);
+            case MsgType.ProjectGitChanges: return onProjectGitChanges(msg.payload);
+            case MsgType.ProjectGitDiff:    return onProjectGitDiff(msg.payload);
+            case MsgType.ProjectSearch:     return onProjectSearch(msg.payload);
+            case MsgType.MCPStatus:         return onMCPStatus(msg.payload);
+            case MsgType.CompactionEvent:   return onCompactionEvent(msg.payload);
+            case MsgType.MemoryReviewEvent: return onMemoryReviewEvent(msg.payload);
+            case MsgType.SlashCommands:        return onSlashCommands(msg.payload);
+            case MsgType.SlashCommandsUpdated: return onSlashCommandsUpdated(msg.payload);
+            case MsgType.SkillsList:           return onSkillsList(msg.payload);
+            case MsgType.SubAgentCallStart:     return onSubAgentTaskEvent(msg.payload);
+            case MsgType.SubAgentStatusUpdate:  return onSubAgentTaskEvent(msg.payload);
+            case MsgType.SubAgentResult:        return onSubAgentTaskEvent(msg.payload);
+            default: console.warn('未知消息类型:', msg.type, msg.payload);
+        }
+    }
+
+    function onStatusUpdate(p) {
+        if (!p || !p.status) return;
+        setAgentStatus(p.status);
+    }
+
+    function onStreamChunk(p) {
+        if (!p || !p.delta) return;
+        state.streaming = true;
+        // 首个 chunk 到达：移除占位的 thinking 节点
+        if (state.expectingAssistant) {
+            state.expectingAssistant = false;
+            hideThinking();
+        }
+        appendStreamDelta(p.delta);
+    }
+
+    function onStreamDone(p) {
+        state.streaming = false;
+        hideThinking();
+        finalizeAssistantMessage();
+        // 用户主动取消时，为最后一条 assistant 消息添加取消视觉标记
+        if (p?.reason === 'aborted') {
+            const lastMsg = state.messages[state.messages.length - 1];
+            if (lastMsg && lastMsg.role === 'assistant') {
+                const chatArea = document.getElementById('chat-area');
+                const lastBubble = chatArea?.querySelector('.message-wrap:last-child .message-bubble');
+                if (lastBubble) {
+                    lastBubble.innerHTML = renderMarkdown(abortMarker);
+                    lastBubble.classList.add('message-aborted');
+                    enhanceCodeBlocks(lastBubble);
+                }
+            }
+        }
+        // 完成后 Send 按钮恢复
+        renderSendButton();
+        // 流结束：刷新会话列表（保证左侧条目的预览/时间同步）
+        sendWS(MsgType.ListSessions, {});
+    }
+
+    function onStreamError(p) {
+        state.streaming = false;
+        state.expectingAssistant = false;
+        hideThinking();
+        // 中断/错误时先将已接收的流式内容固化为完整消息，避免内容丢失
+        finalizeAssistantMessage();
+        const code = p?.code || 'unknown';
+        const message = p?.message || '未知错误';
+        renderErrorCard(code, message);
+        renderSendButton();
+    }
+
+    function onSessionList(p) {
+        const sessions = p?.sessions || [];
+        renderSessionList(sessions);
+        if (state.sessionsTableActive) {
+            renderSessionsTable(sessions);
+        }
+    }
+
+    function onSessionLoaded(p) {
+        if (!p) return;
+        // 切到任意会话时收起表格视图（/new、/resume、点侧边栏、点击表格行）
+        hideSessionsTable();
+        state.sessionId = p.session_id || null;
+        state.messages = (p.messages || []).map(m => ({
+            role: m.role,
+            content: m.content || '',
+            // 保留 tool_call 字段，否则历史会话中的工具调用记录会丢失
+            tool_call: m.tool_call || null,
+        }));
+        state._subAgentById = {};
+        state._activeSubAgentIds = {};
+        renderAllMessages();
+        updateSessionHeader(p.summary);
+        // 同步模型名（后端在 session_loaded 中带回 model 字段）
+        if (p.model) {
+            state.modelName = p.model;
+            dom.modelName.textContent = p.model;
+        }
+        requestProjectDir('', { skipIfCurrent: true });
+        // 高亮左侧对应会话项
+        highlightActiveSession();
+        // 任何"会话切换/重置"事件都会改变左侧列表的预览、消息数、更新时间等字段，
+        // 这里统一拉一次最新列表，避免出现 /clear 后侧栏标题仍展示旧首条消息这类不一致。
+        sendWS(MsgType.ListSessions, {});
+        // Step 7：切换会话重置轻量压缩计数（属于上一会话的统计）
+        state.compactLightCount = 0;
+        renderCompactStat();
+    }
+
+    // onSessionDeleted 收到删除完成回执。
+    // 后端已经在删除当前会话的情况下追加了一条 session_loaded，
+    // 因此这里只需要刷新一次会话列表即可，无需再处理消息区。
+    function onSessionDeleted(p) {
+        if (!p) return;
+        // 不论删除的是不是当前会话，都需要刷新一次列表
+        sendWS(MsgType.ListSessions, {});
+    }
+
+    function onContextUsage(p) {
+        if (!p) return;
+        state.ctx.used = p.used || 0;
+        state.ctx.limit = p.limit || 100;
+        state.ctx.percentLeft = p.percent_left ?? 100;
+        renderCtxBar();
+        // Step 4：System Prompt token 可观测性
+        renderSPInfo(p);
+    }
+
+    // ---- Step 4: System Prompt 可观测性 ----
+
+    // renderSPInfo 渲染状态栏 SP 区域 + 4 层小计 tooltip。
+    //
+    // 行为：
+    //   1. 显示 SP 总 token 数（sp_total_tokens），0 时显示 "--"
+    //   2. 鼠标悬停时弹出 4 行小计（按 Source 顺序展示）
+    function renderSPInfo(p) {
+        if (!dom.spTokens) return;
+        const total = p.sp_total_tokens || 0;
+        dom.spTokens.textContent = total > 0 ? formatTokenCount(total) : '--';
+
+        if (!dom.spBreakdown) return;
+        const breakdown = Array.isArray(p.sp_breakdown) ? p.sp_breakdown : [];
+        if (breakdown.length === 0) {
+            dom.spBreakdown.innerHTML = '<div class="sp-breakdown-row"><span class="sp-breakdown-name">（无）</span></div>';
+            return;
+        }
+        const rows = breakdown.map(s => {
+            const name = escapeHtml(s.name || '');
+            const tokens = s.tokens || 0;
+            return `<div class="sp-breakdown-row"><span class="sp-breakdown-name">${name}</span><span class="sp-breakdown-tokens">${formatTokenCount(tokens)}</span></div>`;
+        }).join('');
+        dom.spBreakdown.innerHTML = rows +
+            `<div class="sp-breakdown-row sp-breakdown-total"><span class="sp-breakdown-name">total</span><span class="sp-breakdown-tokens">${formatTokenCount(total)}</span></div>`;
+    }
+
+    // formatTokenCount 把 1500 显示为 "1.5k"，15000 显示为 "15k"；
+    // 1000 以下原样输出。状态栏空间有限，需要紧凑表示。
+    function formatTokenCount(n) {
+        if (typeof n !== 'number' || n <= 0) return '0';
+        if (n < 1000) return String(n);
+        if (n < 10000) return (n / 1000).toFixed(1) + 'k';
+        return Math.round(n / 1000) + 'k';
+    }
+
+    // onDevExportSP 处理后端推送的 dev_export_sp 响应，渲染到模态框中。
+    function onDevExportSP(p) {
+        if (!p) return;
+        const total = p.total_tokens || 0;
+        const blocks = Array.isArray(p.system_blocks) ? p.system_blocks : [];
+        const stats = Array.isArray(p.stats) ? p.stats : [];
+        const lead = p.lead_user_message || '';
+
+        if (dom.spModalSummary) {
+            dom.spModalSummary.innerHTML = `共 <strong>${blocks.length}</strong> 段 system 字段 · <strong>${total}</strong> tokens${lead ? ' · 含首条 user 消息' : ''}`;
+        }
+        if (dom.spModalSystem) {
+            dom.spModalSystem.textContent = blocks.length > 0
+                ? blocks.map((b, i) => `--- [${i + 1}] ---\n${b}`).join('\n\n')
+                : '（空）';
+        }
+        if (dom.spModalLead) {
+            dom.spModalLead.textContent = lead || '（空）';
+        }
+        if (dom.spModalStats) {
+            dom.spModalStats.textContent = stats.length > 0
+                ? stats.map(s => `${s.name}: ${s.tokens}`).join('\n')
+                : '（空）';
+        }
+        if (dom.spModal) {
+            dom.spModal.hidden = false;
+        }
+    }
+
+    // 关闭 SP 模态框（点击 backdrop 或关闭按钮触发）
+    function closeSPModal() {
+        if (dom.spModal) {
+            dom.spModal.hidden = true;
+        }
+    }
+
+    // =========================================================================
+    // Step 1.5 Task 4：用户文件栏目录导航
+    // =========================================================================
+
+    const PROJECT_DIR_REASON_TEXT = {
+        empty_workdir: '服务端未配置用户目录，无法加载文件。',
+        invalid_path: '目录路径无效，已拒绝加载。',
+        outside_workdir: '目录路径超出用户目录，已拒绝加载。',
+        not_found: '目录不存在或已被删除。',
+        not_directory: '该路径不是目录。',
+        read_error: '读取目录失败，请稍后重试。',
+        entry_limit: '当前目录条目较多，已显示前一部分结果。',
+    };
+
+    function normalizeProjectPath(path) {
+        const raw = String(path || '').replace(/\\/g, '/').trim();
+        if (!raw || raw === '.') return '';
+        return raw.replace(/^\/+/, '').replace(/\/+$/, '');
+    }
+
+    function displayProjectPath(path) {
+        const p = normalizeProjectPath(path);
+        return p || '.';
+    }
+
+    function requestProjectDir(path, options = {}) {
+        const target = normalizeProjectPath(path);
+        if (!dom.projectPanel) return;
+        const force = !!options.force;
+        const skipIfCurrent = !!options.skipIfCurrent;
+        if (!force && state.projectDirPending && state.projectDirPending.path === target) {
+            return;
+        }
+        if (skipIfCurrent && !state.projectDirPending && normalizeProjectPath(state.projectDirPath) === target && state.projectDirEntriesCache[target]) {
+            return;
+        }
+        const seq = state.projectDirSeq + 1;
+        state.projectDirSeq = seq;
+        const requestId = `dir-${seq}`;
+        state.projectDirPending = { seq, path: target, requestId };
+        setProjectDirLoading(true);
+        const sent = sendWS(MsgType.ListProjectDir, { path: target, request_id: requestId });
+        if (!sent) {
+            state.projectDirPending = null;
+            setProjectDirLoading(false);
+            showProjectDirError('WebSocket 未连接，无法加载项目目录。');
+        }
+    }
+
+    function onProjectDir(p) {
+        if (!p) return;
+        const responsePath = normalizeProjectPath(p.path);
+        const responseRequestId = String(p.request_id || '');
+        const pending = state.projectDirPending;
+        if (pending) {
+            if (responsePath !== pending.path) return;
+            if (responseRequestId && pending.requestId && responseRequestId !== pending.requestId) return;
+        } else if (responsePath !== normalizeProjectPath(state.projectDirPath)) {
+            return;
+        }
+        state.projectDirPending = null;
+        setProjectDirLoading(false);
+
+        if (p.ok === false) {
+            showProjectDirError(projectDirReasonText(p.reason));
+            return;
+        }
+
+        const entries = Array.isArray(p.entries) ? p.entries : [];
+        state.projectDirPath = responsePath;
+        state.projectDirEntriesCache[responsePath] = entries;
+        renderProjectPathbar(responsePath, Array.isArray(p.breadcrumbs) ? p.breadcrumbs : []);
+        renderProjectCount(entries.length, !!p.truncated);
+        if (dom.projectTruncated) {
+            dom.projectTruncated.hidden = !p.truncated;
+            if (p.truncated) dom.projectTruncated.textContent = projectDirReasonText(p.reason || 'entry_limit');
+        }
+        renderProjectFileList(entries, normalizeProjectPath(p.parent_path));
+        if (dom.projectEmpty) dom.projectEmpty.hidden = entries.length !== 0;
+        if (dom.projectError) dom.projectError.hidden = true;
+    }
+
+    function onProjectFile(p) {
+        if (!p) return;
+        const file = p.file || {};
+        const responsePath = normalizeProjectPath(file.path || p.path);
+        const responseRequestId = String(p.request_id || '');
+        const pending = state.projectFilePending;
+        if (!pending || responsePath !== pending.path) {
+            return;
+        }
+        if (responseRequestId && pending.requestId && responseRequestId !== pending.requestId) {
+            return;
+        }
+        clearProjectFilePending();
+
+        updateProjectFileModalMeta(file, p.reason);
+        if (p.ok !== true) {
+            renderProjectFileUnavailable(p.reason, file);
+            return;
+        }
+        renderProjectFileContent(file, p.content || '');
+    }
+
+    function setProjectDirLoading(loading) {
+        state.projectDirLoading = !!loading;
+        if (dom.projectLoading) dom.projectLoading.hidden = !loading;
+        if (dom.projectRefreshBtn) dom.projectRefreshBtn.disabled = !!loading;
+        if (loading) {
+            if (dom.projectPanelCount) dom.projectPanelCount.textContent = '--';
+            if (dom.projectEmpty) dom.projectEmpty.hidden = true;
+            if (dom.projectError) dom.projectError.hidden = true;
+            if (dom.projectTruncated) dom.projectTruncated.hidden = true;
+            if (dom.projectFileList) dom.projectFileList.innerHTML = '';
+        }
+    }
+
+    function showProjectDirError(message) {
+        if (!dom.projectPanel) return;
+        if (dom.projectLoading) dom.projectLoading.hidden = true;
+        if (dom.projectEmpty) dom.projectEmpty.hidden = true;
+        if (dom.projectTruncated) dom.projectTruncated.hidden = true;
+        if (dom.projectFileList) dom.projectFileList.innerHTML = '';
+        if (dom.projectPanelCount) dom.projectPanelCount.textContent = 'ERR';
+        if (dom.projectRefreshBtn) dom.projectRefreshBtn.disabled = false;
+        if (dom.projectError) dom.projectError.hidden = false;
+        if (dom.projectErrorText) dom.projectErrorText.textContent = message || '无法加载目录，请稍后重试。';
+    }
+
+    function projectDirReasonText(reason) {
+        return PROJECT_DIR_REASON_TEXT[reason] || '无法加载目录，请稍后重试。';
+    }
+
+    function renderProjectPathbar(path, breadcrumbs) {
+        const current = displayProjectPath(path);
+        if (dom.projectCurrentPath) {
+            dom.projectCurrentPath.textContent = current;
+            dom.projectCurrentPath.title = current === '.' ? '用户目录' : current;
+        }
+        if (!dom.projectBreadcrumbs) return;
+        dom.projectBreadcrumbs.innerHTML = '';
+        const crumbs = breadcrumbs.length > 0 ? breadcrumbs : [{ name: 'root', path: '' }];
+        crumbs.forEach((crumb, index) => {
+            const crumbPath = normalizeProjectPath(crumb.path);
+            const btn = document.createElement('button');
+            btn.className = 'project-crumb';
+            if (index === crumbs.length - 1) btn.classList.add('is-active');
+            btn.type = 'button';
+            btn.textContent = crumb.name || (crumbPath ? crumbPath.split('/').pop() : 'root');
+            btn.title = displayProjectPath(crumbPath);
+            btn.addEventListener('click', () => requestProjectDir(crumbPath));
+            dom.projectBreadcrumbs.appendChild(btn);
+        });
+    }
+
+    function renderProjectCount(count, truncated) {
+        if (!dom.projectPanelCount) return;
+        const n = Number.isFinite(count) ? count : 0;
+        dom.projectPanelCount.textContent = truncated ? `${n}+` : String(n);
+    }
+
+    function renderProjectFileList(entries, parentPath) {
+        if (!dom.projectFileList) return;
+        dom.projectFileList.innerHTML = '';
+        if (state.projectDirPath) {
+            dom.projectFileList.appendChild(buildProjectParentItem(parentPath));
+        }
+        entries.forEach(entry => {
+            dom.projectFileList.appendChild(buildProjectEntryItem(entry));
+        });
+    }
+
+    function buildProjectParentItem(parentPath) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'project-file-item is-directory';
+        btn.title = '返回上级目录';
+        btn.addEventListener('click', () => requestProjectDir(parentPath || ''));
+        btn.appendChild(buildProjectIcon('..'));
+        const main = document.createElement('span');
+        main.className = 'project-file-main';
+        const name = document.createElement('span');
+        name.className = 'project-file-name';
+        name.textContent = '..';
+        const meta = document.createElement('span');
+        meta.className = 'project-file-meta';
+        const label = document.createElement('span');
+        label.textContent = 'parent';
+        meta.appendChild(label);
+        main.appendChild(name);
+        main.appendChild(meta);
+        btn.appendChild(main);
+        return btn;
+    }
+
+    function buildProjectEntryItem(entry) {
+        const isDir = entry && entry.type === 'directory';
+        const path = normalizeProjectPath(entry?.path);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `project-file-item ${isDir ? 'is-directory' : 'is-file'}`;
+        if (!isDir && entry && entry.previewable === false) btn.classList.add('is-unpreviewable');
+        btn.title = path || entry?.name || '';
+        btn.setAttribute('role', 'listitem');
+        btn.addEventListener('click', () => {
+            if (isDir) {
+                requestProjectDir(path);
+                return;
+            }
+            openProjectFileModal(path);
+        });
+        btn.appendChild(buildProjectIcon(isDir ? 'D' : 'F'));
+
+        const main = document.createElement('span');
+        main.className = 'project-file-main';
+        const name = document.createElement('span');
+        name.className = 'project-file-name';
+        name.textContent = entry?.name || path || '(unnamed)';
+        const meta = document.createElement('span');
+        meta.className = 'project-file-meta';
+        appendProjectMeta(meta, isDir ? 'directory' : projectEntryMeta(entry));
+        if (!isDir && entry?.mod_time) appendProjectMeta(meta, formatTime(entry.mod_time));
+        main.appendChild(name);
+        main.appendChild(meta);
+        btn.appendChild(main);
+        return btn;
+    }
+
+    function buildProjectIcon(text) {
+        const icon = document.createElement('span');
+        icon.className = 'project-file-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = text;
+        return icon;
+    }
+
+    function appendProjectMeta(container, text) {
+        if (!container || !text) return;
+        if (container.childNodes.length > 0) {
+            const dot = document.createElement('span');
+            dot.className = 'project-file-meta-dot';
+            dot.setAttribute('aria-hidden', 'true');
+            container.appendChild(dot);
+        }
+        const span = document.createElement('span');
+        span.textContent = text;
+        container.appendChild(span);
+    }
+
+    function projectEntryMeta(entry) {
+        if (!entry) return 'file';
+        const parts = [];
+        if (entry.render_type) parts.push(entry.render_type);
+        if (entry.language && entry.language !== entry.render_type) parts.push(entry.language);
+        parts.push(formatProjectFileSize(entry.size));
+        if (entry.previewable === false) parts.push('preview later');
+        return parts.filter(Boolean).join(' · ');
+    }
+
+    function formatProjectFileSize(size) {
+        const n = Number(size || 0);
+        if (!Number.isFinite(n) || n <= 0) return '0 B';
+        if (n < 1024) return `${n} B`;
+        if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`;
+        return `${(n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+    }
+
+    const PROJECT_FILE_REASON_TEXT = {
+        empty_workdir: '服务端未配置用户目录，无法读取文件。',
+        invalid_payload: '文件读取请求格式无效。',
+        invalid_path: '文件路径无效，已拒绝读取。',
+        outside_workdir: '文件路径超出用户目录，已拒绝读取。',
+        not_found: '文件不存在或已被删除。',
+        is_directory: '这是一个目录，不能作为文件预览。',
+        binary: '二进制文件暂不支持预览。',
+        too_large: '文件过大，未加载正文内容。',
+        not_previewable: '该文件暂不支持预览。',
+        read_error: '读取文件失败，请稍后重试。',
+    };
+
+    function setProjectTab(tab, options = {}) {
+        const next = ['files', 'git', 'search'].includes(tab) ? tab : 'files';
+        state.projectActiveTab = next;
+        dom.projectTabButtons.forEach(btn => {
+            const active = (btn.dataset.projectTab || '') === next;
+            btn.classList.toggle('is-active', active);
+            btn.setAttribute('aria-selected', active ? 'true' : 'false');
+            btn.tabIndex = active ? 0 : -1;
+        });
+        dom.projectTabPanels.forEach(panel => {
+            const active = (panel.dataset.projectTabPanel || '') === next;
+            panel.hidden = !active;
+            panel.classList.toggle('is-active', active);
+        });
+        if (options.noLoad) return;
+        if (next === 'files') {
+            if (!state.projectDirLoading && !state.projectDirEntriesCache[state.projectDirPath || '']) {
+                requestProjectDir(state.projectDirPath || '', { force: true });
+            }
+            return;
+        }
+        if (next === 'git' && (!state.projectGitLoaded || options.force)) {
+            requestProjectGitChanges({ force: options.force });
+        }
+    }
+
+    function requestProjectGitChanges(options = {}) {
+        if (!dom.projectGitList) return;
+        const seq = state.projectGitSeq + 1;
+        state.projectGitSeq = seq;
+        const requestId = `git-${seq}`;
+        state.projectGitPending = { seq, requestId };
+        setProjectGitLoading(true);
+        showProjectGitError('');
+        setProjectGitStatus('loading', 'Loading changes...');
+        if (!sendWS(MsgType.ListProjectGitChanges, { request_id: requestId })) {
+            state.projectGitPending = null;
+            setProjectGitLoading(false);
+            setProjectGitStatus('error', 'Disconnected');
+            showProjectGitError('WebSocket is disconnected. Reconnect and refresh Git.');
+        }
+    }
+
+    function onProjectGitChanges(p) {
+        if (!p) return;
+        const pending = state.projectGitPending;
+        if (pending && p.request_id && p.request_id !== pending.requestId) return;
+        state.projectGitPending = null;
+        state.projectGitLoaded = true;
+        setProjectGitLoading(false);
+        const ok = p.ok !== false;
+        if (!ok) {
+            const reason = projectGitReasonText(p.reason);
+            setProjectGitStatus('error', reason);
+            showProjectGitError(reason);
+            renderProjectGitList([]);
+            return;
+        }
+        const entries = Array.isArray(p.entries) ? p.entries : [];
+        renderProjectGitList(entries);
+        const suffix = p.truncated ? '+' : '';
+        const label = entries.length === 1 ? '1 change' : `${entries.length}${suffix} changes`;
+        setProjectGitStatus(entries.length ? 'ok' : 'empty', entries.length ? label : 'No changes');
+    }
+
+    function setProjectGitLoading(loading) {
+        if (dom.projectGitLoading) dom.projectGitLoading.hidden = !loading;
+        if (dom.projectGitRefreshBtn) dom.projectGitRefreshBtn.disabled = !!loading;
+    }
+
+    function setProjectGitStatus(kind, text) {
+        if (dom.projectGitStatusText) dom.projectGitStatusText.textContent = text || '';
+        if (dom.projectGitStatusDot) {
+            dom.projectGitStatusDot.dataset.state = kind || '';
+        }
+        if (dom.projectGitCount) dom.projectGitCount.textContent = text || '--';
+    }
+
+    function showProjectGitError(message) {
+        if (dom.projectGitError) dom.projectGitError.hidden = !message;
+        if (dom.projectGitErrorText) dom.projectGitErrorText.textContent = message || '';
+    }
+
+    function renderProjectGitList(entries) {
+        if (!dom.projectGitList) return;
+        dom.projectGitList.innerHTML = '';
+        const hasEntries = entries.length > 0;
+        if (dom.projectGitEmpty) dom.projectGitEmpty.hidden = hasEntries;
+        entries.forEach(entry => dom.projectGitList.appendChild(buildProjectGitItem(entry)));
+    }
+
+    function buildProjectGitItem(entry) {
+        const path = normalizeProjectPath(entry?.path || '');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'project-git-item';
+        btn.disabled = !path;
+        btn.addEventListener('click', () => openProjectGitDiffModal(path));
+
+        const badge = document.createElement('span');
+        badge.className = 'project-git-status';
+        badge.textContent = projectGitStatusLabel(entry?.status);
+        btn.appendChild(badge);
+
+        const main = document.createElement('span');
+        main.className = 'project-git-main';
+        const name = document.createElement('span');
+        name.className = 'project-git-path';
+        name.textContent = path || '(unknown)';
+        name.title = path || '';
+        const meta = document.createElement('span');
+        meta.className = 'project-git-meta';
+        const metaParts = [];
+        if (entry?.original_path && entry.original_path !== path) metaParts.push(`from ${entry.original_path}`);
+        if (entry?.size) metaParts.push(formatProjectFileSize(entry.size));
+        meta.textContent = metaParts.join(' - ');
+        main.appendChild(name);
+        if (meta.textContent) main.appendChild(meta);
+        btn.appendChild(main);
+        return btn;
+    }
+
+    function projectGitStatusLabel(status) {
+        const map = {
+            modified: 'M', added: 'A', deleted: 'D', renamed: 'R', copied: 'C', untracked: '?', conflicted: '!', unknown: '?',
+        };
+        return map[String(status || '').toLowerCase()] || String(status || '?').slice(0, 1).toUpperCase();
+    }
+
+    function openProjectGitDiffModal(path) {
+        const filePath = normalizeProjectPath(path);
+        if (!filePath) return;
+        if (state.projectGitDiffPending?.timer) clearTimeout(state.projectGitDiffPending.timer);
+        const seq = state.projectGitDiffSeq + 1;
+        state.projectGitDiffSeq = seq;
+        const requestId = `git-diff-${seq}`;
+        const modal = buildDiffModalSkeleton(filePath);
+        modal.classList.add('is-project-git-diff', 'project-git-diff-modal');
+        document.body.appendChild(modal);
+        const body = modal.querySelector('.diff-modal-body');
+        const title = modal.querySelector('.diff-modal-filename');
+        const subtitle = modal.querySelector('.diff-modal-toolname');
+        if (title) {
+            title.textContent = filePath;
+            title.title = filePath;
+        }
+        if (subtitle) subtitle.textContent = 'Git diff';
+        const clearGitDiffPending = () => {
+            if (state.projectGitDiffPending?.requestId !== requestId) return;
+            if (state.projectGitDiffPending.timer) clearTimeout(state.projectGitDiffPending.timer);
+            state.projectGitDiffPending = null;
+        };
+        const escHandler = (ev) => {
+            if (ev.key === 'Escape') {
+                clearGitDiffPending();
+                closeFileDiffModal(modal, filePath);
+            }
+        };
+        document.addEventListener('keydown', escHandler);
+        modal._escHandler = escHandler;
+        modal.addEventListener('click', (ev) => {
+            if (ev.target === modal) clearGitDiffPending();
+        }, true);
+        modal.querySelectorAll('[data-diff-modal-close]').forEach(el => {
+            el.addEventListener('click', () => {
+                clearGitDiffPending();
+                closeFileDiffModal(modal, filePath);
+            });
+        });
+        renderDiffMessage(body, 'Loading Git diff...', false);
+        const timer = setTimeout(() => {
+            if (!state.projectGitDiffPending || state.projectGitDiffPending.requestId !== requestId) return;
+            state.projectGitDiffPending = null;
+            if (modal.isConnected) renderDiffMessage(body, 'Git diff request timed out.', true);
+        }, FILE_DIFF_REQUEST_TIMEOUT_MS);
+        state.projectGitDiffPending = { seq, requestId, path: filePath, modal, timer };
+        if (!sendWS(MsgType.ReadProjectGitDiff, { path: filePath, request_id: requestId })) {
+            clearTimeout(timer);
+            state.projectGitDiffPending = null;
+            renderDiffMessage(body, 'WebSocket is disconnected. Reconnect and retry.', true);
+        }
+    }
+
+    function onProjectGitDiff(p) {
+        if (!p) return;
+        const pending = state.projectGitDiffPending;
+        if (pending && p.request_id && p.request_id !== pending.requestId) return;
+        if (!pending) return;
+        if (pending.timer) clearTimeout(pending.timer);
+        state.projectGitDiffPending = null;
+        const modal = pending.modal;
+        if (!modal || !modal.isConnected) return;
+        const body = modal.querySelector('.diff-modal-body');
+        if (!p.found || p.ok === false) {
+            renderDiffMessage(body, projectGitDiffReasonText(p.reason), true);
+            return;
+        }
+        renderDiffGrid(body, p);
+    }
+
+    function projectGitReasonText(reason) {
+        const map = {
+            empty_workdir: 'User directory is not configured.',
+            not_git_repository: 'This user directory is not a Git repository.',
+            git_unavailable: 'Git command is not available.',
+            git_error: 'Git status failed.',
+            invalid_payload: 'Invalid Git request.',
+        };
+        return map[reason] || 'Unable to load Git changes.';
+    }
+
+    function projectGitDiffReasonText(reason) {
+        const map = {
+            empty_workdir: 'User directory is not configured.',
+            invalid_payload: 'Invalid Git diff request.',
+            invalid_path: 'Invalid file path.',
+            outside_workdir: 'File path is outside the user directory.',
+            not_git_repository: 'This user directory is not a Git repository.',
+            not_changed: 'This file has no Git change to preview.',
+            binary: 'Binary file diff cannot be previewed.',
+            too_large: 'File is too large to preview.',
+            read_error: 'Failed to read Git diff.',
+        };
+        return map[reason] || 'Unable to preview Git diff.';
+    }
+
+    function requestProjectSearch() {
+        if (!dom.projectSearchForm) return;
+        const query = (dom.projectSearchQuery?.value || '').trim();
+        const path = normalizeProjectPath(dom.projectSearchPath?.value || '');
+        const regex = !!dom.projectSearchRegex?.checked;
+        const exclude = parseProjectSearchExcludes(dom.projectSearchExclude?.value || '');
+        showProjectSearchError('');
+        if (!query) {
+            renderProjectSearchResults(null);
+            showProjectSearchError('Enter a search query.');
+            return;
+        }
+        const seq = state.projectSearchSeq + 1;
+        state.projectSearchSeq = seq;
+        const requestId = `search-${seq}`;
+        state.projectSearchPending = { seq, requestId };
+        setProjectSearchLoading(true);
+        const payload = { query, path, regex, exclude, request_id: requestId };
+        if (!sendWS(MsgType.SearchProject, payload)) {
+            state.projectSearchPending = null;
+            setProjectSearchLoading(false);
+            showProjectSearchError('WebSocket is disconnected. Reconnect and search again.');
+        }
+    }
+
+    function onProjectSearch(p) {
+        if (!p) return;
+        const pending = state.projectSearchPending;
+        if (pending && p.request_id && p.request_id !== pending.requestId) return;
+        state.projectSearchPending = null;
+        setProjectSearchLoading(false);
+        if (p.ok === false) {
+            renderProjectSearchResults(null);
+            showProjectSearchError(projectSearchReasonText(p.reason));
+            return;
+        }
+        renderProjectSearchResults(p);
+    }
+
+    function setProjectSearchLoading(loading) {
+        if (dom.projectSearchLoading) dom.projectSearchLoading.hidden = !loading;
+        if (dom.projectSearchRunBtn) dom.projectSearchRunBtn.disabled = !!loading;
+    }
+
+    function showProjectSearchError(message) {
+        if (dom.projectSearchError) dom.projectSearchError.hidden = !message;
+        if (dom.projectSearchErrorText) dom.projectSearchErrorText.textContent = message || '';
+    }
+
+    function renderProjectSearchResults(result) {
+        if (!dom.projectSearchResults) return;
+        dom.projectSearchResults.innerHTML = '';
+        const files = Array.isArray(result?.files) ? result.files : [];
+        const hasResults = files.length > 0;
+        if (dom.projectSearchEmpty) dom.projectSearchEmpty.hidden = hasResults || !!result;
+        if (dom.projectSearchSummary) {
+            if (!result) {
+                dom.projectSearchSummary.textContent = '--';
+            } else {
+                const total = Number(result.total_matches || 0);
+                const scanned = Number(result.scanned_files || 0);
+                const suffix = result.truncated ? `, truncated by ${result.truncated_by || 'limit'}` : '';
+                dom.projectSearchSummary.textContent = `${total} matches in ${files.length} files (${scanned} scanned${suffix})`;
+            }
+        }
+        files.forEach(file => dom.projectSearchResults.appendChild(buildProjectSearchResult(file)));
+    }
+
+    function buildProjectSearchResult(file) {
+        const filePath = normalizeProjectPath(file?.path || '');
+        const wrap = document.createElement('div');
+        wrap.className = 'project-search-result';
+        const header = document.createElement('button');
+        header.type = 'button';
+        header.className = 'project-search-result-file';
+        header.textContent = filePath || '(unknown)';
+        header.title = filePath || '';
+        header.disabled = !filePath;
+        header.addEventListener('click', () => openProjectFileModal(filePath));
+        wrap.appendChild(header);
+
+        const matches = Array.isArray(file?.matches) ? file.matches : [];
+        matches.forEach(match => {
+            const line = document.createElement('button');
+            line.type = 'button';
+            line.className = 'project-search-match';
+            line.addEventListener('click', () => openProjectFileModal(filePath));
+            const lineNo = document.createElement('span');
+            lineNo.className = 'project-search-line';
+            lineNo.textContent = String(match?.line || '');
+            const snippet = document.createElement('span');
+            snippet.className = 'project-search-snippet';
+            snippet.textContent = match?.snippet || match?.text || '';
+            line.appendChild(lineNo);
+            line.appendChild(snippet);
+            wrap.appendChild(line);
+        });
+        return wrap;
+    }
+
+    function parseProjectSearchExcludes(value) {
+        return String(value || '')
+            .split(/[\n,]+/)
+            .map(s => s.trim())
+            .filter(Boolean);
+    }
+
+    function projectSearchReasonText(reason) {
+        const map = {
+            empty_workdir: 'User directory is not configured.',
+            invalid_payload: 'Invalid search request.',
+            empty_query: 'Enter a search query.',
+            invalid_path: 'Invalid search path.',
+            outside_workdir: 'Search path is outside the user directory.',
+            invalid_regex: 'Invalid regular expression.',
+            scan_error: 'Search failed while scanning files.',
+        };
+        return map[reason] || 'User directory search failed.';
+    }
+
+    function handleProjectSidebarConnectionClosed() {
+        state.projectGitPending = null;
+        if (state.projectGitDiffPending?.timer) clearTimeout(state.projectGitDiffPending.timer);
+        if (state.projectGitDiffPending?.modal?.isConnected) {
+            const body = state.projectGitDiffPending.modal.querySelector('.diff-modal-body');
+            renderDiffMessage(body, 'Connection closed. Reconnect and reopen this Git diff.', true);
+        }
+        state.projectGitDiffPending = null;
+        state.projectSearchPending = null;
+        setProjectGitLoading(false);
+        setProjectSearchLoading(false);
+    }
+    function openProjectFileModal(path) {
+        const filePath = normalizeProjectPath(path);
+        if (!dom.projectFileModal || !filePath) return;
+        clearProjectFilePending();
+
+        const seq = state.projectFileSeq + 1;
+        state.projectFileSeq = seq;
+        const requestId = `file-${seq}`;
+        const timer = setTimeout(() => {
+            const pending = state.projectFilePending;
+            if (!pending || pending.seq !== seq || pending.path !== filePath || pending.requestId !== requestId) return;
+            clearProjectFilePending();
+            renderProjectFileState('error', '读取文件超时，请稍后重试。');
+        }, 15000);
+        state.projectFilePending = { seq, path: filePath, requestId, timer };
+
+        updateProjectFileModalMeta({ path: filePath, name: projectFileNameFromPath(filePath) }, 'loading');
+        renderProjectFileState('loading', '正在读取文件...');
+        dom.projectFileModal.hidden = false;
+        if (dom.projectFileModalBody) dom.projectFileModalBody.focus({ preventScroll: true });
+
+        const sent = sendWS(MsgType.ReadProjectFile, { path: filePath, request_id: requestId });
+        if (!sent) {
+            clearProjectFilePending();
+            renderProjectFileState('error', 'WebSocket 未连接，无法读取文件。');
+        }
+    }
+
+    function closeProjectFileModal() {
+        clearProjectFilePending();
+        if (dom.projectFileModal) dom.projectFileModal.hidden = true;
+    }
+
+    function handleProjectFileConnectionClosed() {
+        if (!state.projectFilePending) return;
+        clearProjectFilePending();
+        if (dom.projectFileModal && !dom.projectFileModal.hidden) {
+            renderProjectFileState('error', '连接已断开，重连后请重新打开文件。');
+        }
+    }
+
+    function clearProjectFilePending() {
+        if (state.projectFilePending?.timer) {
+            clearTimeout(state.projectFilePending.timer);
+        }
+        state.projectFilePending = null;
+    }
+
+    function updateProjectFileModalMeta(file, reason) {
+        const filePath = normalizeProjectPath(file?.path);
+        const name = file?.name || projectFileNameFromPath(filePath) || '文件预览';
+        const renderType = file?.render_type || (reason === 'loading' ? 'loading' : '--');
+        const language = file?.language || (renderType && renderType !== 'plain' ? renderType : 'plain');
+        if (dom.projectFileModalTitle) dom.projectFileModalTitle.textContent = name;
+        if (dom.projectFileModalPath) {
+            const displayPath = filePath || '--';
+            dom.projectFileModalPath.textContent = displayPath;
+            dom.projectFileModalPath.title = displayPath;
+        }
+        if (dom.projectFileModalSize) dom.projectFileModalSize.textContent = Number.isFinite(Number(file?.size)) ? formatProjectFileSize(file.size) : '--';
+        if (dom.projectFileModalType) dom.projectFileModalType.textContent = `类型 ${renderType || '--'}`;
+        if (dom.projectFileModalLanguage) dom.projectFileModalLanguage.textContent = `格式 ${language || '--'}`;
+    }
+
+    function projectFileNameFromPath(path) {
+        const p = normalizeProjectPath(path);
+        if (!p) return '';
+        const parts = p.split('/').filter(Boolean);
+        return parts[parts.length - 1] || p;
+    }
+
+    function renderProjectFileContent(file, content) {
+        if (!dom.projectFileModalBody) return;
+        const renderType = String(file?.render_type || 'plain').toLowerCase();
+        const language = String(file?.language || '').toLowerCase();
+        if (renderType === 'binary') {
+            renderProjectFileUnavailable('binary', file);
+            return;
+        }
+        if (renderType === 'markdown') {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'project-file-preview-markdown';
+            wrapper.innerHTML = renderMarkdown(content);
+            dom.projectFileModalBody.innerHTML = '';
+            dom.projectFileModalBody.appendChild(wrapper);
+            enhanceCodeBlocks(wrapper);
+            return;
+        }
+        if (renderType === 'json') {
+            renderProjectJSON(content);
+            return;
+        }
+        if (renderType === 'xml' || renderType === 'code') {
+            renderProjectHighlightedCode(content, language || renderType);
+            return;
+        }
+        renderProjectPlainText(content);
+    }
+
+    function renderProjectJSON(content) {
+        let text = content;
+        let parseError = null;
+        try {
+            text = JSON.stringify(JSON.parse(content), null, 2);
+        } catch (err) {
+            parseError = err;
+            console.warn('project file JSON parse failed, fallback to raw text', err);
+        }
+        renderProjectHighlightedCode(text, 'json');
+        if (parseError && dom.projectFileModalBody) {
+            const note = document.createElement('div');
+            note.className = 'project-file-preview-note';
+            note.textContent = 'JSON 解析失败，已按原文显示。';
+            dom.projectFileModalBody.insertBefore(note, dom.projectFileModalBody.firstChild);
+        }
+    }
+
+    function renderProjectHighlightedCode(content, language) {
+        if (!dom.projectFileModalBody) return;
+        const pre = document.createElement('pre');
+        pre.className = 'project-file-preview-code hljs';
+        if (language) pre.classList.add(`language-${language}`);
+        pre.innerHTML = highlightCode(content, language);
+        dom.projectFileModalBody.innerHTML = '';
+        dom.projectFileModalBody.appendChild(pre);
+    }
+
+    function renderProjectPlainText(content) {
+        if (!dom.projectFileModalBody) return;
+        const pre = document.createElement('pre');
+        pre.className = 'project-file-preview-plain';
+        pre.textContent = content || '';
+        dom.projectFileModalBody.innerHTML = '';
+        dom.projectFileModalBody.appendChild(pre);
+    }
+
+    function renderProjectFileUnavailable(reason, file) {
+        const text = projectFileReasonText(reason);
+        updateProjectFileModalMeta(file || {}, reason);
+        renderProjectFileState(reason === 'too_large' || reason === 'binary' || reason === 'not_previewable' ? 'unpreviewable' : 'error', text);
+    }
+
+    function renderProjectFileState(kind, message) {
+        if (!dom.projectFileModalBody) return;
+        const el = document.createElement('div');
+        const cls = kind === 'error'
+            ? 'project-file-preview-error'
+            : kind === 'unpreviewable'
+                ? 'project-file-preview-unpreviewable'
+                : kind === 'loading'
+                    ? 'project-file-preview-loading'
+                    : 'project-file-preview-placeholder';
+        el.className = cls;
+        el.textContent = message || '';
+        dom.projectFileModalBody.innerHTML = '';
+        dom.projectFileModalBody.appendChild(el);
+    }
+
+    function projectFileReasonText(reason) {
+        return PROJECT_FILE_REASON_TEXT[reason] || '无法预览该文件。';
+    }
+
+    function bindProjectFilePanel() {
+        if (state.projectPanelBound) return;
+        state.projectPanelBound = true;
+        dom.projectTabButtons.forEach(btn => {
+            btn.addEventListener('click', () => setProjectTab(btn.dataset.projectTab || 'files'));
+        });
+        if (dom.projectGitRefreshBtn) {
+            dom.projectGitRefreshBtn.addEventListener('click', () => requestProjectGitChanges({ force: true }));
+        }
+        if (dom.projectSearchForm) {
+            dom.projectSearchForm.addEventListener('submit', (ev) => {
+                ev.preventDefault();
+                requestProjectSearch();
+            });
+        }
+        setProjectTab(state.projectActiveTab || 'files', { noLoad: true });
+        if (dom.projectRefreshBtn) {
+            dom.projectRefreshBtn.addEventListener('click', () => requestProjectDir(state.projectDirPath || '', { force: true }));
+        }
+        if (dom.projectFileModal) {
+            dom.projectFileModal.querySelectorAll('[data-project-file-modal-close]').forEach(el => {
+                el.addEventListener('click', closeProjectFileModal);
+            });
+        }
+        document.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape' && dom.projectFileModal && !dom.projectFileModal.hidden) {
+                closeProjectFileModal();
+            }
+        });
+        renderProjectPathbar('', []);
+        setProjectDirLoading(false);
+    }
+
+    // toggleDevPanel 切换开发者面板显示。
+    function toggleDevPanel(force) {
+        if (!dom.devPanel) return;
+        const next = (force === undefined) ? !dom.devPanel.hidden : force;
+        dom.devPanel.hidden = !next;
+    }
+
+    // ---- 工具消息：开始 / 结束事件 ----
+    // Step 2 引入。tool_call_start 立即插入"running"占位块;
+    // tool_call_end 按 tool_use_id 找到对应块并切换为完成/失败/取消态。
+    // 设计为幂等：重复收到同一 id 的 start 不重复插入；end 在没有匹配 start
+    // 时直接插入一个"已完成"块（兜底）。
+    function onToolCallStart(p) {
+        if (!p || !p.tool_use_id) return;
+        if (shouldSuppressToolCallDisplay(p.name)) {
+            finalizeAssistantMessage();
+            state._suppressedToolById[p.tool_use_id] = true;
+            return;
+        }
+        // 若已存在同 id 的块（异常重发），跳过
+        if (state._toolById[p.tool_use_id]) return;
+        // 关键：在插入工具块之前，先将当前流式助手消息固化为独立消息。
+        // 因为 stream_done 在 AgentLoop 全部迭代结束后才发送（不是每次迭代后），
+        // 如果不提前固化，所有迭代的文本会累积到同一个流式消息中，
+        // 导致"所有分析文本在前 → 所有工具调用在后"的非交替布局。
+        finalizeAssistantMessage();
+        const node = appendToolStartNode(p.tool_use_id, p.name, p.input, p.started_at, p.server);
+        state._toolById[p.tool_use_id] = node;
+        scrollToBottomIfNeeded();
+    }
+
+    function onToolCallEnd(p) {
+        if (!p || !p.tool_use_id) return;
+        if (state._suppressedToolById[p.tool_use_id] || shouldSuppressToolCallDisplay(p.name)) {
+            delete state._suppressedToolById[p.tool_use_id];
+            return;
+        }
+        let node = state._toolById[p.tool_use_id];
+        if (!node) {
+            // 异常路径：end 先到 start 后到（或 start 丢失），按已完成态直接插入
+            node = appendToolStartNode(p.tool_use_id, p.name, '', p.started_at, p.server);
+            state._toolById[p.tool_use_id] = node;
+        }
+        updateToolEndNode(node, p);
+        scrollToBottomIfNeeded();
+    }
+
+    // =========================================================================
+    // Step 1.4：文件改动预览弹窗
+    // =========================================================================
+    // 触发链路：「查看改动」按钮 → openFileDiffModal(toolUseId)
+    //   → ws 发 get_file_diff → 收到 file_diff → onFileDiff 路由到对应回调
+    //   → 渲染双栏 diff（或显示 reason 文案）
+    //
+    // 设计要点：
+    //   1. 每个弹窗独立 callback map（state._fileDiffCallbacks）→ 互不串扰
+    //   2. 10 秒超时：定时器到点未回包 → 显示"请求超时"
+    //   3. 关闭路径统一：closeFileDiffModal 负责清定时器 + 移 DOM + 解绑全局 Esc
+    //   4. DOM 全程 createElement（XSS 防护），只有 hljs 高亮后的 innerHTML 走 DOMPurify
+
+    // 拉取文件 diff 的超时时间（10s）。进程内 FileDiffStore 是内存数据，
+    // 拉取为本地查表动作，正常应在毫秒级返回；10s 已经是非常宽裕的兜底。
+    const FILE_DIFF_REQUEST_TIMEOUT_MS = 10000;
+
+    // reason 字段 → 用户可读文案。统一收口便于文案调整。
+    const FILE_DIFF_REASON_TEXT = {
+        not_found: '暂无改动预览（可能进程已重启，或该调用为旧会话）',
+        too_large: '文件改动过大（> 2 MB），已放弃预览',
+    };
+
+    // onFileDiff 收到后端的 file_diff 响应，路由到对应 tool_use_id 的回调。
+    // 找不到回调时（已超时/已关闭）静默丢弃，避免回包顺序错乱时的控制台噪音。
+    function onFileDiff(p) {
+        if (!p || !p.tool_use_id) return;
+        const cb = state._fileDiffCallbacks[p.tool_use_id];
+        if (!cb) return;
+        // 清理 10s 定时器（必须在 delete 之前取消，否则回调里再 close 时会重复清理）
+        if (cb.timer) {
+            clearTimeout(cb.timer);
+        }
+        delete state._fileDiffCallbacks[p.tool_use_id];
+        try {
+            cb.resolve(p);
+        } catch (err) {
+            console.error('file_diff 回调执行失败', err);
+        }
+    }
+
+    // openFileDiffModal 打开指定 tool_use_id 的文件改动预览弹窗。
+    // 流程：
+    //   1. 校验 + 构造 modal DOM（loading 态）插入 body
+    //   2. 注册 Esc 关闭、点击 backdrop 关闭、关闭按钮关闭
+    //   3. ws 发 get_file_diff；10s 超时显示错误文案
+    //   4. 收到回包后渲染双栏 diff 或显示 reason
+    function openFileDiffModal(toolUseId) {
+        if (!toolUseId) {
+            console.warn('openFileDiffModal: toolUseId 为空');
+            return;
+        }
+        // 避免同一 tool_use_id 并发打开多个弹窗
+        if (state._fileDiffCallbacks[toolUseId]) {
+            console.warn('openFileDiffModal: 已存在同 ID 的弹窗，忽略重复请求', toolUseId);
+            return;
+        }
+
+        const modal = buildDiffModalSkeleton(toolUseId);
+        document.body.appendChild(modal);
+        const body = modal.querySelector('.diff-modal-body');
+
+        // 显示 loading 态
+        renderDiffMessage(body, '正在加载改动预览…', /*error=*/false);
+
+        // 绑定关闭路径
+        const escHandler = (ev) => {
+            if (ev.key === 'Escape') {
+                closeFileDiffModal(modal, toolUseId);
+            }
+        };
+        document.addEventListener('keydown', escHandler);
+        modal._escHandler = escHandler;
+
+        modal.querySelectorAll('[data-diff-modal-close]').forEach(el => {
+            el.addEventListener('click', () => closeFileDiffModal(modal, toolUseId));
+        });
+
+        // 注册回调 + 定时器
+        let resolveCb;
+        const promise = new Promise((resolve) => { resolveCb = resolve; });
+        const timer = setTimeout(() => {
+            const cb = state._fileDiffCallbacks[toolUseId];
+            if (!cb) return;
+            delete state._fileDiffCallbacks[toolUseId];
+            renderDiffMessage(body, '请求超时（> 10s）未收到响应', /*error=*/true);
+        }, FILE_DIFF_REQUEST_TIMEOUT_MS);
+        state._fileDiffCallbacks[toolUseId] = { resolve: resolveCb, timer, modal };
+
+        // 发送查询
+        const sent = sendWS(MsgType.GetFileDiff, { tool_use_id: toolUseId });
+        if (!sent) {
+            // WS 未连接：立刻清理
+            clearTimeout(timer);
+            delete state._fileDiffCallbacks[toolUseId];
+            renderDiffMessage(body, '与 MetaAtoms 的连接已断开，请稍后重试', /*error=*/true);
+            return;
+        }
+
+        // 异步渲染：resolve 后根据 payload 渲染
+        promise.then(payload => {
+            // 弹窗可能在等待期间被关闭（用户按 Esc / 点击遮罩）
+            if (!modal.isConnected) return;
+            if (payload.tool_use_id !== toolUseId) {
+                // 极小概率：服务端回串了别的 ID（理论上不会发生），按兜底处理
+                renderDiffMessage(body, '响应与请求不匹配，请稍后重试', /*error=*/true);
+                return;
+            }
+            if (!payload.found) {
+                const reason = payload.reason || 'not_found';
+                const text = FILE_DIFF_REASON_TEXT[reason] || `未找到改动预览（reason=${reason}）`;
+                renderDiffMessage(body, text, /*error=*/true);
+                return;
+            }
+            renderDiffGrid(body, payload);
+        });
+    }
+
+    // closeFileDiffModal 关闭弹窗：清回调 + 定时器 + DOM + 全局 Esc。
+    // 不重复清理：clearTimeout / delete 重复调用是 no-op。
+    function closeFileDiffModal(modal, toolUseId) {
+        if (!modal) return;
+        if (modal._escHandler) {
+            document.removeEventListener('keydown', modal._escHandler);
+            modal._escHandler = null;
+        }
+        const cb = state._fileDiffCallbacks[toolUseId];
+        if (cb) {
+            if (cb.timer) clearTimeout(cb.timer);
+            delete state._fileDiffCallbacks[toolUseId];
+        }
+        if (modal.parentNode) modal.parentNode.removeChild(modal);
+    }
+
+    // buildDiffModalSkeleton 构造弹窗骨架。文件路径/工具名从工具块头部取。
+    function buildDiffModalSkeleton(toolUseId) {
+        const modal = document.createElement('div');
+        modal.className = 'diff-modal';
+        modal.dataset.toolUseId = toolUseId;
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-modal', 'true');
+        modal.setAttribute('aria-label', '文件改动预览');
+
+        // 从工具块头部取文件名 / 工具名（让用户一眼知道是哪次调用的改动）
+        const toolNode = state._toolById[toolUseId];
+        let filePath = '';
+        let toolName = '';
+        if (toolNode) {
+            const summaryEl = toolNode.querySelector('.message-tool-summary');
+            const nameEl = toolNode.querySelector('.message-tool-name');
+            filePath = (summaryEl?.textContent || '').trim();
+            toolName = (nameEl?.textContent || '').trim();
+        }
+
+        // backdrop 与 inner 都在同一节点下：inner 上的点击不能冒泡到 modal 关闭
+        modal.innerHTML = `
+            <div class="diff-modal-inner" role="document">
+                <div class="diff-modal-header">
+                    <span class="diff-modal-filename" title="${escapeHTML(filePath || toolUseId)}">${escapeHTML(filePath || toolUseId)}</span>
+                    <span class="diff-modal-toolname">${escapeHTML(toolName || 'Diff')}</span>
+                    <span class="diff-modal-spacer"></span>
+                    <button class="diff-modal-close" type="button" data-diff-modal-close title="关闭 (Esc)">×</button>
+                </div>
+                <div class="diff-modal-body"></div>
+            </div>
+        `;
+        // 点击 .diff-modal 自身（即遮罩空白）关闭；inner 内部点击不触发。
+        // 通过 capture 阶段拦截，点击 inner 时不冒泡到 modal 自身
+        // （DOM 上 modal 是 inner 的父，inner 事件不会冒泡到 modal？会的）
+        // 正确做法：在 inner 上加 stopPropagation
+        const inner = modal.querySelector('.diff-modal-inner');
+        if (inner) {
+            inner.addEventListener('click', (ev) => ev.stopPropagation());
+        }
+        modal.addEventListener('click', (ev) => {
+            if (ev.target === modal) {
+                closeFileDiffModal(modal, toolUseId);
+            }
+        });
+        return modal;
+    }
+
+    // renderDiffMessage 在 body 区域显示一行消息（loading / 错误 / 空态）。
+    function renderDiffMessage(body, text, isError) {
+        body.innerHTML = '';
+        const msg = document.createElement('div');
+        msg.className = 'diff-modal-message' + (isError ? ' error' : '');
+        msg.textContent = text;
+        body.appendChild(msg);
+    }
+
+    // renderDiffGrid 在 body 区域构建双栏 diff。
+    // 输入为 FileDiffPayload（含 before / after / language）。
+    //
+    // 渲染策略（自上而下三层）：
+    //   1. 行级 diff：dmp.diff_linesToChars_ + diff_main + diff_cleanupEfficiency
+    //      （不调 diff_cleanupSemantic，它在小改动上倾向过度合并，会把"明显不同"
+    //      的多行强行包成一个 op，导致上下文错位；Efficiency 仅合并不经济的碎片，
+    //      行边界更稳定）
+    //   2. 双栏排版：把 [ctx|add|del] 块拆成单行，按行号递增左右两栏同步
+    //      - ctx 行 → 双栏都画
+    //      - del 行 → 仅左栏（红底）
+    //      - add 行 → 仅右栏（绿底）
+    //   3. 行内 inline word diff：对成对 (del, add) 行做字符级 diff_main，
+    //      在 del 行内包裹 <span class="diff-word-del">…</span> 标红删除线，
+    //      在 add 行内包裹 <span class="diff-word-add">…</span> 标绿
+    //      - changed 行（del/add）使用纯文本 + 词级高亮（避免 hljs 跨 span 干扰 diff 标记）
+    //      - unchanged 行（ctx）保留完整 hljs 语法高亮（赏心悦目）
+    //      配对策略：连续 del 块与紧随其后的连续 add 块按行数两两配对 min(dels, adds)，
+    //      剩余单边行保持原状
+    function renderDiffGrid(body, payload) {
+        body.innerHTML = '';
+        const grid = document.createElement('div');
+        grid.className = 'diff-grid';
+
+        const left = document.createElement('div');
+        left.className = 'diff-side';
+        const right = document.createElement('div');
+        right.className = 'diff-side';
+
+        const leftLabel = document.createElement('div');
+        leftLabel.className = 'diff-side-label';
+        leftLabel.textContent = 'Before';
+        left.appendChild(leftLabel);
+
+        const rightLabel = document.createElement('div');
+        rightLabel.className = 'diff-side-label';
+        rightLabel.textContent = 'After';
+        right.appendChild(rightLabel);
+
+        // 行级 diff：dmp 在 window 全局上（vendor/diff-match-patch.min.js UMD 暴露）
+        const dmp = window.diff_match_patch;
+        const before = payload.before || '';
+        const after = payload.after || '';
+        const language = payload.language || '';
+
+        // 原文按行切分（pop 末尾空行：和 rows 拆行策略保持一致）
+        // 关键：rows 拆行时也 pop 末尾空，所以这里必须同步 pop，否则 cursor 索引错位
+        const beforeRawLines = splitLines(before);
+        const afterRawLines = splitLines(after);
+
+        // 整体高亮 Before/After 全文（一次调用，O(n)），仅 ctx 行使用
+        // 高亮失败时回退纯文本，由 escapeHTML 注入保证 XSS 安全。
+        const beforeHL = splitHighlightLines(highlightCode(before, language));
+        const afterHL = splitHighlightLines(highlightCode(after, language));
+
+        // 计算行级 diff
+        let rows = []; // 每项 { op: 'eq'|'add'|'del', text }
+        try {
+            if (!dmp) {
+                // 极端情况：vendor 没加载到；按整段当作 equal 行处理
+                rows = [{ op: 'eq', text: before }];
+                if (after && after !== before) {
+                    rows.push({ op: 'del', text: before });
+                    rows.push({ op: 'add', text: after });
+                }
+            } else {
+                const d = new dmp();
+                // 用 diff_linesToChars_ 把多行文本先按行压缩为单字符，
+                // 再走 diff_main，这是官方推荐的大文本做法（速度远好于直接对长字符串做 diff）。
+                const a = d.diff_linesToChars_(before, after);
+                const diffs = d.diff_main(a.chars1, a.chars2, false);
+                d.diff_charsToLines_(diffs, a.lineArray);
+                // 改用 diff_cleanupEfficiency（仅合并不经济碎片），不用 diff_cleanupSemantic。
+                // Semantic 在小改动上倾向过度合并，会把多行不相干的修改包成同一个 op，
+                // 反而让 del/add 块边界错位。Efficiency 保守且行边界稳定。
+                d.diff_cleanupEfficiency(diffs);
+                // 注意：diff-match-patch 的 Diff 类型是普通对象 {0:op, 1:text}，
+                // 不是数组，不可迭代，不能用 [op, text] 解构。必须用 d[0]/d[1] 访问。
+                rows = diffs.map(d => ({
+                    op: d[0] === 0 ? 'eq' : (d[0] > 0 ? 'add' : 'del'),
+                    text: d[1],
+                }));
+            }
+        } catch (err) {
+            console.error('diff 计算失败', err);
+            rows = [{ op: 'eq', text: before }];
+        }
+
+        // Split diff ops into side-by-side visual rows. Consecutive changed ops
+        // belong to the same hunk, so deleted and added lines should share row
+        // slots instead of being stacked one after another.
+        let leftLine = 0;   // Before 栏行号
+        let rightLine = 0;  // After 栏行号
+        const leftRows = [];   // Before 栏行
+        const rightRows = [];  // After 栏行
+
+        for (let i = 0; i < rows.length; i++) {
+            const r = rows[i];
+            if (r.op === 'eq') {
+                const lines = splitDiffRowLines(r.text);
+                for (const line of lines) {
+                    leftLine += 1;
+                    rightLine += 1;
+                    leftRows.push({ lineNo: leftLine, cls: 'ctx' });
+                    rightRows.push({ lineNo: rightLine, cls: 'ctx' });
+                }
+                continue;
+            }
+
+            const delLines = [];
+            const addLines = [];
+            while (i < rows.length && rows[i].op !== 'eq') {
+                const changedLines = splitDiffRowLines(rows[i].text);
+                if (rows[i].op === 'del') {
+                    delLines.push(...changedLines);
+                } else if (rows[i].op === 'add') {
+                    addLines.push(...changedLines);
+                }
+                i++;
+            }
+            i -= 1;
+
+            const rowCount = Math.max(delLines.length, addLines.length);
+            for (let k = 0; k < rowCount; k++) {
+                if (k < delLines.length) {
+                    leftLine += 1;
+                    leftRows.push({ lineNo: leftLine, cls: 'del' });
+                } else {
+                    leftRows.push({ lineNo: 0, cls: 'empty' });
+                }
+
+                if (k < addLines.length) {
+                    rightLine += 1;
+                    rightRows.push({ lineNo: rightLine, cls: 'add' });
+                } else {
+                    rightRows.push({ lineNo: 0, cls: 'empty' });
+                }
+            }
+        }
+        // 把原文行号 → 高亮 HTML 的对应行做映射
+        // 关键：beforeHL 的每一项对应 beforeRawLines 同一索引（已 pop 末尾空）
+        // 即：第 N 个非 empty 行 → beforeHL[N-1]（0-based 索引）
+        const leftHL = pickHighlightByIndex(leftRows, beforeHL, /*hasContent=*/r => r.cls !== 'empty');
+        const rightHL = pickHighlightByIndex(rightRows, afterHL, /*hasContent=*/r => r.cls !== 'empty');
+
+        // 行内 inline word diff：对成对 (del, add) 行做字符级 diff。
+        // 算法：
+        //   - 扫 leftRows / rightRows，连续的 del 块和紧随其后的连续 add 块视为"成对修改段"
+        //   - 段内按行数两两配对（min(del 数, add 数)）
+        //   - 配对的行用 dmp.diff_main(text1, text2, false) 做字符级 diff
+        //   - 把 [op, text] 渲染为：op=-1 标 .diff-word-del；op=1 标 .diff-word-add；op=0 原样
+        //   - changed 行用纯文本（escapeHTML）渲染，避免 hljs 跨 span 与 inline diff 嵌套
+        //   - 剩余单边行（多出 del 或多出 add）保持原样
+        applyInlineWordDiff(leftRows, rightRows, leftHL, rightHL, dmp);
+
+        // 渲染
+        for (let i = 0; i < leftRows.length; i++) {
+            const row = leftRows[i];
+            left.appendChild(buildDiffLine(row.lineNo, row.cls, leftHL[i] || '', row.hasInline));
+        }
+        for (let i = 0; i < rightRows.length; i++) {
+            const row = rightRows[i];
+            right.appendChild(buildDiffLine(row.lineNo, row.cls, rightHL[i] || '', row.hasInline));
+        }
+
+        grid.appendChild(left);
+        grid.appendChild(right);
+        body.appendChild(grid);
+    }
+
+    // applyInlineWordDiff 就地修改 leftHL / rightHL 数组：
+    //   - 对成对 (del, add) 行所在位置，原纯文本 / hljs 字符串替换为带 .diff-word-*
+    //     包裹的 HTML 片段（行内 inline diff）
+    //   - 配对行同时修改 row 标记（添加 .has-inline-diff 类），CSS 可据此加左侧色条
+    //
+    // 入参说明：
+    //   - leftRows / rightRows：renderDiffGrid 内部已算好的行元数据
+    //   - leftHL / rightHL：与 leftRows/rightRows 等长的"内容 HTML"数组（ctx 行用 hljs，初始全用 hljs）
+    //   - dmp：window.diff_match_patch 构造器；为 null 时跳过 inline diff（保留原 hljs 染色）
+    function applyInlineWordDiff(leftRows, rightRows, leftHL, rightHL, dmp) {
+        if (!dmp) return;
+        const n = leftRows.length;
+        for (let i = 0; i < n; i++) {
+            if (leftRows[i].cls !== 'del' || rightRows[i].cls !== 'add') continue;
+            const beforeText = stripHTML(leftHL[i] || '');
+            const afterText = stripHTML(rightHL[i] || '');
+            if (beforeText === afterText) continue;
+            const d = new dmp();
+            const charDiffs = d.diff_main(beforeText, afterText, false);
+            d.diff_cleanupSemantic(charDiffs);
+            leftHL[i] = renderInlineDiff(charDiffs, /*side=*/'del');
+            rightHL[i] = renderInlineDiff(charDiffs, /*side=*/'add');
+            leftRows[i].hasInline = true;
+            rightRows[i].hasInline = true;
+        }
+    }
+    // stripHTML 去除 HTML 标签，仅保留文本内容。用于把 hljs 高亮后的 HTML 转回原文做 inline diff。
+    // 实现：单个正则匹配 <...> 非贪婪替换为空；HTML 实体原样保留（与 inline diff 字符串内容一致即可）。
+    // 注意：hljs 高亮的 HTML 不含 <script> 等危险标签（vendor 是 trusted），这里只是去标签不做安全转义。
+    function stripHTML(html) {
+        if (!html) return '';
+        return html.replace(/<[^>]*>/g, '');
+    }
+
+    // renderInlineDiff 把字符级 dmp diff 渲染为带 .diff-word-* 包裹的 HTML。
+    // side='del'：保留 DEL 与 EQUAL，INS 丢弃（Before 不显示新增部分）
+    // side='add'：保留 INS 与 EQUAL，DEL 丢弃（After 不显示删除部分）
+    // 输出字符串可直接 innerHTML 注入：所有内容都经过 escapeHTML 处理，无脚本风险。
+    function renderInlineDiff(charDiffs, side) {
+        const parts = [];
+        for (let i = 0; i < charDiffs.length; i++) {
+            const op = charDiffs[i][0];
+            const text = charDiffs[i][1];
+            if (op === 0) {
+                // 公共部分：原样
+                parts.push(escapeHTML(text));
+            } else if (op === -1) {
+                // DEL：仅在 Before 侧保留
+                if (side === 'del') {
+                    parts.push('<span class="diff-word-del">' + escapeHTML(text) + '</span>');
+                }
+            } else { // op === 1
+                // INS：仅在 After 侧保留
+                if (side === 'add') {
+                    parts.push('<span class="diff-word-add">' + escapeHTML(text) + '</span>');
+                }
+            }
+        }
+        return parts.join('');
+    }
+
+    // splitLines 把字符串按 \n 切分并 pop 末尾空字符串，与 renderDiffGrid
+    // 内部拆行策略保持一致；为外部组件（如单元测试）提供稳定接口。
+    function splitLines(text) {
+        if (!text) return [];
+        const lines = text.split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+        return lines;
+    }
+
+    function splitDiffRowLines(text) {
+        const lines = String(text || '').split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+        return lines;
+    }
+    // splitHighlightLines 对高亮后的 HTML 字符串按 \n 切分。
+    // 简化策略：hljs 对代码块几乎都是逐行 token 化，跨行 span 极少；
+    // 即便出现跨行 tag，视觉上只会"掉色"一行，不影响 diff 行级准确性。
+    function splitHighlightLines(html) {
+        if (!html) return [];
+        const lines = html.split('\n');
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+        return lines;
+    }
+
+    // pickHighlightByIndex 按"非 empty 行序号"取 hljsLines 的对应行。
+    // 同步 pop 末尾空后，rows 非 empty 数量 === hljsLines 数量，按 cursor 取即可。
+    function pickHighlightByIndex(rows, hljsLines, hasContent) {
+        const result = new Array(rows.length).fill('');
+        let cursor = 0;
+        for (let i = 0; i < rows.length; i++) {
+            if (!hasContent(rows[i])) {
+                result[i] = '';
+                continue;
+            }
+            if (cursor < hljsLines.length) {
+                result[i] = hljsLines[cursor];
+            } else {
+                // 越界兜底：rows 多了 hljsLines 少了（极端），用空字符串
+                result[i] = '';
+            }
+            cursor += 1;
+        }
+        return result;
+    }
+
+    // buildDiffLine 构造单行 DOM：行号 + 内容（内容为已高亮 HTML）。
+    // 内容直接用 innerHTML 注入：来自 highlightCode（hljs / escapeHTML），无脚本风险。
+    // 兼容 hasInline 标记：applyInlineWordDiff 设置后，给行加 .diff-line-has-inline 类，
+    // CSS 可据此加深左侧色条，视觉上强调"这行有行内词级高亮"。
+    function buildDiffLine(lineNo, cls, contentHTML, hasInline) {
+        const row = document.createElement('div');
+        let className = 'diff-line diff-line-' + cls;
+        if (hasInline) className += ' diff-line-has-inline';
+        row.className = className;
+        const num = document.createElement('span');
+        num.className = 'diff-line-num';
+        num.textContent = lineNo > 0 ? String(lineNo) : '';
+        const content = document.createElement('span');
+        content.className = 'diff-line-content';
+        content.innerHTML = contentHTML || '';
+        row.appendChild(num);
+        row.appendChild(content);
+        return row;
+    }
+
+    // highlightCode 对一段文本做 hljs 高亮。未识别语言（空）走 escapeHTML，
+    // 返回纯文本，调用方通过 innerHTML 注入仍安全。
+    function highlightCode(text, language) {
+        if (!text) return '';
+        if (language && window.hljs) {
+            try {
+                const result = window.hljs.highlight(text, { language, ignoreIllegals: true });
+                return result.value;
+            } catch (err) {
+                console.warn('hljs 高亮失败，回退纯文本', err);
+            }
+        }
+        return escapeHTML(text);
+    }
+
+    // =========================================================================
+    // 渲染层
+    // =========================================================================
+
+    function hasActiveSubAgents() {
+        return Object.keys(state._activeSubAgentIds || {}).length > 0;
+    }
+
+    function isAgentBusy() {
+        return state.streaming
+            || state.agentStatus === 'thinking'
+            || state.agentStatus === 'tool_running'
+            || state.agentStatus === 'compacting'
+            || hasActiveSubAgents();
+    }
+    function setAgentStatus(status) {
+        state.agentStatus = status;
+        const map = {
+            idle: '就绪',
+            thinking: '思考中',
+            tool_running: '工具执行中',
+            error: '错误',
+            compacting: '压缩中',
+        };
+        dom.statusText.textContent = map[status] || status;
+        dom.statusDot.dataset.status = status;
+        // 输入框禁用态：思考中 / 工具执行中 / 压缩中 都不可输入
+        dom.input.disabled = isAgentBusy();
+        // 若用户刚发了消息而 thinking 节点尚未渲染（后端 status_update 抢先到达），
+        // 兜底补一个；正常情况下 onSendClicked 已主动插入。
+        if (status === 'thinking' && state.expectingAssistant) {
+            showThinking();
+        }
+        renderSendButton();
+    }
+
+    function renderSendButton() {
+        const busy = isAgentBusy();
+        dom.input.disabled = busy;
+        if (busy) {
+            dom.sendBtn.classList.remove('send-btn');
+            dom.sendBtn.classList.add('abort-btn');
+            dom.sendBtn.textContent = 'Stop';
+            dom.sendBtn.onclick = () => sendWS(MsgType.AbortStream, {});
+            dom.sendBtn.title = '停止当前响应 (Esc)';
+        } else {
+            dom.sendBtn.classList.remove('abort-btn');
+            dom.sendBtn.classList.add('send-btn');
+            dom.sendBtn.textContent = 'Send';
+            dom.sendBtn.onclick = onSendClicked;
+            dom.sendBtn.title = '发送 (Enter)';
+        }
+    }
+
+    function renderSessionList(sessions) {
+        if (!sessions.length) {
+            dom.sessionList.innerHTML = `
+                <div class="sidebar-empty">
+                    尚无历史会话<br>
+                    <span style="color: var(--fg-faint)">新建一次对话后会自动出现在这里</span>
+                </div>`;
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        for (const s of sessions) {
+            const el = document.createElement('div');
+            el.className = 'session-item';
+            el.dataset.id = s.id;
+            el.setAttribute('role', 'listitem');
+            // 删除按钮放在 meta 行右侧；点击时停止冒泡避免触发整行的 resume
+            el.innerHTML = `
+                <span class="session-preview">${escapeHTML(s.preview || '(空会话)')}</span>
+                <span class="session-meta">
+                    <span class="session-meta-info">
+                        <span>${s.message_count} 条消息</span>
+                        <span>${formatTime(s.updated_at)}</span>
+                    </span>
+                    <button
+                        class="session-delete"
+                        type="button"
+                        title="删除该会话"
+                        aria-label="删除会话"
+                        data-id="${escapeHTML(s.id)}"
+                    ><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 4h10"></path>
+                        <path d="M6 4V2.5h4V4"></path>
+                        <path d="M4 4l.7 9.2A1.5 1.5 0 0 0 6.2 14.5h3.6a1.5 1.5 0 0 0 1.5-1.3L12 4"></path>
+                        <path d="M6.5 7v5"></path>
+                        <path d="M9.5 7v5"></path>
+                    </svg></button>
+                </span>
+            `;
+            // 行点击：恢复该会话
+            el.addEventListener('click', () => {
+                sendWS(MsgType.ResumeSession, { id: s.id });
+            });
+            // 删除按钮：拦截冒泡避免触发整行 resume，然后直接发送 delete_session
+            const delBtn = el.querySelector('.session-delete');
+            if (delBtn) {
+                delBtn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    ev.preventDefault();
+                    sendWS(MsgType.DeleteSession, { id: s.id });
+                });
+            }
+            frag.appendChild(el);
+        }
+        dom.sessionList.innerHTML = '';
+        dom.sessionList.appendChild(frag);
+        highlightActiveSession();
+    }
+
+    function highlightActiveSession() {
+        if (!dom.sessionList) return;
+        for (const el of dom.sessionList.querySelectorAll('.session-item')) {
+            el.classList.toggle('is-active', el.dataset.id === state.sessionId);
+        }
+    }
+
+    // =========================================================================
+    // /sessions 表格视图
+    // 在主区以表格形式展示「最近 10 个、创建时间倒序」的会话，
+    // 点击行直接 resume；可点关闭按钮或开始新对话收起。
+    // =========================================================================
+
+    function getSessionsTableEl() {
+        let el = document.getElementById('sessions-table');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'sessions-table';
+            el.className = 'sessions-table';
+            el.hidden = true;
+            // 插入到 messages 之前，作为 main 的同级 flex 子项
+            dom.messages.parentElement.insertBefore(el, dom.messages);
+        }
+        return el;
+    }
+
+    function openSessionsTable() {
+        // 标记为表格视图：onSessionList 收到响应时会渲染表格
+        state.sessionsTableActive = true;
+        getSessionsTableEl();
+        sendWS(MsgType.ListSessions, { mode: 'table' });
+    }
+
+    function hideSessionsTable() {
+        state.sessionsTableActive = false;
+        const el = document.getElementById('sessions-table');
+        if (el) el.hidden = true;
+        // 表格关闭后恢复 messages 区域
+        if (dom.messages) dom.messages.hidden = false;
+    }
+
+    function renderSessionsTable(sessions) {
+        const el = getSessionsTableEl();
+        el.innerHTML = buildSessionsTableHTML(sessions);
+        el.hidden = false;
+        // 表格显示时藏起 messages 区域，避免下方露出空状态 / 旧消息
+        if (dom.messages) dom.messages.hidden = true;
+
+        // 行点击 → 触发 resume_session
+        el.querySelectorAll('.sessions-table-row').forEach(row => {
+            row.addEventListener('click', () => {
+                const id = row.dataset.id;
+                if (!id) return;
+                hideSessionsTable();
+                sendWS(MsgType.ResumeSession, { id });
+            });
+        });
+        // 关闭按钮
+        const closeBtn = el.querySelector('.sessions-table-close');
+        if (closeBtn) closeBtn.addEventListener('click', hideSessionsTable);
+    }
+
+    function buildSessionsTableHTML(sessions) {
+        const closeBtn = `<button class="sessions-table-close" type="button" aria-label="关闭表格" title="关闭">×</button>`;
+        if (!sessions.length) {
+            return `
+                <div class="sessions-table-header">
+                    <span class="sessions-table-title">Recent Sessions</span>
+                    <span class="sessions-table-subtitle">按创建时间倒序 · 最近 10 个</span>
+                    ${closeBtn}
+                </div>
+                <div class="sessions-table-empty">尚无历史会话</div>
+            `;
+        }
+        const rows = sessions.map((s, i) => {
+            const idShort = s.id.slice(0, 8);
+            const name = s.preview || '(空会话)';
+            const created = formatDateTime(s.created_at);
+            const msgCount = `${s.message_count || 0} 条消息`;
+            return `
+                <tr class="sessions-table-row" data-id="${escapeHTML(s.id)}" title="点击恢复 · 完整 ID: ${escapeHTML(s.id)}">
+                    <td class="col-idx">${i + 1}</td>
+                    <td class="col-id"><code>${escapeHTML(idShort)}…</code></td>
+                    <td class="col-name">${escapeHTML(name)}</td>
+                    <td class="col-count">${escapeHTML(msgCount)}</td>
+                    <td class="col-time">${escapeHTML(created)}</td>
+                </tr>
+            `;
+        }).join('');
+        return `
+            <div class="sessions-table-header">
+                <span class="sessions-table-title">Recent Sessions</span>
+                <span class="sessions-table-subtitle">按创建时间倒序 · 最近 ${sessions.length} 个</span>
+                ${closeBtn}
+            </div>
+            <div class="sessions-table-scroll">
+                <table class="sessions-table-tbl">
+                    <thead>
+                        <tr>
+                            <th class="col-idx">#</th>
+                            <th class="col-id">Session ID</th>
+                            <th class="col-name">名称</th>
+                            <th class="col-count">消息</th>
+                            <th class="col-time">创建时间</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            <div class="sessions-table-hint">
+                点击行即可恢复该会话；也可在输入框执行 <kbd>/resume &lt;id&gt;</kbd>
+            </div>
+        `;
+    }
+
+    // formatDateTime 把 ISO 时间格式化为 YYYY-MM-DD HH:MM。
+    function formatDateTime(iso) {
+        if (!iso) return '--';
+        try {
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return '--';
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        } catch { return '--'; }
+    }
+
+    // =========================================================================
+    // /skills 模态框（Step 10 Task 6）
+    // 触发链路：/skills 命令 → 前端识别 category==="client" → openSkillsTable
+    //   → 发送 list_skills → 后端回推 skills_list → 渲染三档 tab。
+    // 与 /sessions 表格视图（openSessionsTable / renderSessionsTable）风格保持一致。
+    // =========================================================================
+
+    // 当前激活的 Skill 源。协议字段沿用 project / user / builtin：
+    // project 在云端版映射为用户级，user 映射为全局级。
+    let activeSkillSource = 'project';
+
+    // 当前缓存的 Skill 列表（来自后端 skills_list payload）。
+    // 在 onSkillsList 中整体覆盖；renderSkillsList 渲染当前 activeSkillSource 对应数组。
+    let cachedSkillsBySource = { project: [], user: [], builtin: [] };
+
+    // openSkillsTable 打开 /skills 模态框：先显示当前 tab，再异步拉取最新数据。
+    // 拉取成功后 onSkillsList 触发 renderSkillsList 刷新内容；
+    // 拉取失败时由 sendWS 静默丢弃（保持与 list_sessions 的容错风格一致）。
+    function openSkillsTable() {
+        const modal = document.getElementById('skills-modal');
+        if (!modal) {
+            console.warn('openSkillsTable: skills-modal 元素不存在');
+            return;
+        }
+        // 重置为用户级 tab（协议字段仍为 project）。
+        activeSkillSource = 'project';
+        cachedSkillsBySource = { project: [], user: [], builtin: [] };
+        // 同步 tab UI（确保打开时是 project 高亮）
+        syncSkillsTabs();
+        // 先以空内容打开模态框（避免视觉空闪）
+        renderSkillsList();
+        modal.hidden = false;
+        // 绑定关闭路径（backdrop 点击 / × 按钮 / Esc 键）
+        bindSkillsModalClose(modal);
+        // 触发后端拉取
+        sendWS(MsgType.ListSkills, {});
+    }
+
+    // closeSkillsModal 关闭 /skills 模态框：清事件 + 隐藏 modal。
+    function closeSkillsModal() {
+        const modal = document.getElementById('skills-modal');
+        if (modal) modal.hidden = true;
+    }
+
+    // bindSkillsModalClose 注册一次性关闭事件：backdrop / × 按钮 / Esc 键。
+    // 用 dataset._bound 标志防重复绑定（多次 openSkillsTable 时只绑一次）。
+    function bindSkillsModalClose(modal) {
+        if (modal.dataset._bound === '1') return;
+        modal.dataset._bound = '1';
+        // backdrop / × 按钮（任何带 data-skills-modal-close 的元素）
+        modal.addEventListener('click', (ev) => {
+            const target = ev.target;
+            if (target && target.dataset && target.dataset.skillsModalClose !== undefined) {
+                closeSkillsModal();
+            }
+        });
+        // Esc 键
+        document.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape' && modal && !modal.hidden) {
+                closeSkillsModal();
+            }
+        });
+    }
+
+    // syncSkillsTabs 同步 tab UI：data-source 与 activeSkillSource 一致的
+    // 元素加 is-active + aria-selected=true，其它清掉。
+    function syncSkillsTabs() {
+        const tabs = document.querySelectorAll('.skills-tab');
+        tabs.forEach(tab => {
+            const isActive = tab.dataset.source === activeSkillSource;
+            tab.classList.toggle('is-active', isActive);
+            tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        });
+        // tab 点击：切 source + 重渲染
+        tabs.forEach(tab => {
+            if (tab.dataset._bound) return;
+            tab.dataset._bound = '1';
+            tab.addEventListener('click', () => {
+                const src = tab.dataset.source;
+                if (!src || src === activeSkillSource) return;
+                activeSkillSource = src;
+                syncSkillsTabs();
+                renderSkillsList();
+            });
+        });
+    }
+
+    // onSkillsList 处理后端回推的 skills_list 响应：缓存三档数据并渲染当前 tab。
+    function onSkillsList(p) {
+        if (!p) return;
+        cachedSkillsBySource = {
+            project: Array.isArray(p.project) ? p.project : [],
+            user:    Array.isArray(p.user) ? p.user : [],
+            builtin: Array.isArray(p.builtin) ? p.builtin : [],
+        };
+        renderSkillsList();
+    }
+
+    // renderSkillsList 渲染当前 activeSkillSource 对应的 Skill 列表到 #skills-list-content。
+    // 空数组时显示「暂无 Skill」空状态 + 用户引导提示。
+    function renderSkillsList() {
+        const el = document.getElementById('skills-list-content');
+        if (!el) return;
+        const list = cachedSkillsBySource[activeSkillSource] || [];
+        if (list.length === 0) {
+            el.innerHTML = `
+                <div class="skills-list-empty">
+                    暂无 Skill
+                    <div class="skills-list-empty-hint">用户级目录为 <code>~/.metaatoms/&lt;user_id&gt;/skills/</code>，全局 Skill 由系统管理员维护。</div>
+                </div>
+            `;
+            return;
+        }
+        const items = list.map(s => {
+            const name = escapeHTML(s.name || '');
+            const desc = escapeHTML(s.description || '');
+            const path = escapeHTML(s.path || '');
+            return `
+                <div class="skills-list-item">
+                    <div><span class="skills-list-item-name">/${name}</span></div>
+                    <div class="skills-list-item-desc">${desc}</div>
+                    ${path ? `<div class="skills-list-item-path">${path}</div>` : ''}
+                </div>
+            `;
+        }).join('');
+        el.innerHTML = items;
+    }
+
+    function updateSessionHeader(summary) {
+        if (!summary) {
+            dom.sessionTitle.textContent = 'CURRENT SESSION';
+            dom.sessionMeta.textContent = '--';
+            return;
+        }
+        dom.sessionMeta.textContent = `${summary.message_count} 条 · ${formatTime(summary.updated_at)}`;
+    }
+
+    function renderAllMessages() {
+        dom.messages.innerHTML = '';
+        // 切换会话时清理打字机动画状态（rAF 可能仍持有旧 DOM 引用）
+        if (state._typewriterRafId) {
+            cancelAnimationFrame(state._typewriterRafId);
+            state._typewriterRafId = null;
+        }
+        state._streamingWrap = null;
+        state._streamingBuffer = '';
+        // 切换会话时清空工具 id 索引（旧的 DOM 节点已不在 DOM 树里）
+        state._toolById = {};
+        state._suppressedToolById = {};
+        state._memoryReviewById = {};
+        state._subAgentById = {};
+        if (!state.messages.length) {
+            renderEmptyState();
+            return;
+        }
+        for (const m of state.messages) {
+            if (m.tool_call) {
+                if (shouldSuppressToolCallDisplay(m.tool_call.name)) continue;
+                // 历史工具消息：直接以"已完成/失败"态插入，不带 running 占位
+                const node = appendToolStartNode(
+                    m.tool_call.id,
+                    m.tool_call.name,
+                    m.tool_call.input,
+                    null,
+                    m.tool_call.server, // Step 8:历史会话中的 MCP 远端工具也带 server 来源
+                );
+                updateToolEndNode(node, {
+                    tool_use_id: m.tool_call.id,
+                    name:        m.tool_call.name,
+                    output:      m.tool_call.output,
+                    is_error:    m.tool_call.is_error,
+                    duration_ms: m.tool_call.duration_ms,
+                    status:      m.tool_call.status,
+                    server:      m.tool_call.server,
+                });
+                state._toolById[m.tool_call.id] = node;
+            } else {
+                appendMessageNode(m.role, m.content, /*streaming=*/ false);
+            }
+        }
+        scrollToBottomIfNeeded();
+    }
+
+    function renderEmptyState() {
+        dom.messages.innerHTML = `
+            <div class="messages-empty">
+                <img class="messages-empty-logo" src="${APP_ICON_SRC}" alt="" aria-hidden="true">
+                <span class="messages-empty-title">描述你的想法，交给 MetaAtoms 规划与实现</span>
+                <span class="messages-empty-hint">
+                    直接输入消息后按 <kbd>Enter</kbd> 发送<br>
+                    <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行<br>
+                    输入 <kbd>/</kbd> 唤出快捷命令（/new · /sessions · /resume · /clear）
+                </span>
+            </div>`;
+    }
+
+    function renderErrorCard(code, message) {
+        const card = document.createElement('div');
+        card.className = 'error-card';
+        card.dataset.code = code;
+        card.innerHTML = `<strong>[${escapeHTML(code)}]</strong> ${escapeHTML(message)}`;
+        dom.messages.appendChild(card);
+        scrollToBottomIfNeeded();
+    }
+
+    // ---- 消息节点 ----
+
+    function appendMessageNode(role, content, streaming) {
+        const isUser = role === 'user';
+        const wrap = document.createElement('div');
+        wrap.className = `message ${isUser ? 'message-user' : 'message-assistant'}`;
+        wrap.dataset.role = role;
+
+        // 头像：Agent 用 exe 图标（与 LOGO 一致），User 用 U（蓝底白字）
+        const avatar = document.createElement('div');
+        avatar.className = 'message-avatar';
+        if (isUser) {
+            avatar.textContent = 'U';
+        } else {
+            const icon = document.createElement('img');
+            icon.className = 'message-avatar-icon';
+            icon.src = APP_ICON_SRC;
+            icon.alt = '';
+            icon.setAttribute('aria-hidden', 'true');
+            avatar.appendChild(icon);
+        }
+        wrap.appendChild(avatar);
+
+        const bubble = document.createElement('div');
+        bubble.className = 'message-bubble';
+        if (isUser) {
+            bubble.textContent = content;       // 用户消息纯文本，避免 XSS
+        } else {
+            // 助手消息：流式时先设空文本占位，实际渲染由 typewriterTick 打字机动画驱动
+            if (streaming) {
+                bubble.textContent = content;
+            } else {
+                bubble.innerHTML = renderMarkdown(content);
+                enhanceCodeBlocks(bubble);
+            }
+        }
+        wrap.appendChild(bubble);
+
+        dom.messages.appendChild(wrap);
+        return wrap;
+    }
+
+    // ---- 工具消息块：appendToolStartNode / updateToolEndNode ----
+    // 与普通消息节点不同，工具消息块是"自管理"的——start 插入占位、end 切换
+    // 状态，全程不依赖全局 _streamingWrap，避免与流式文本互相干扰。
+
+    // 把任意值格式化为展示用的字符串（避免 [object Object]）。
+    function formatToolArg(v) {
+        if (v == null) return '';
+        if (typeof v === 'string') return v;
+        if (typeof v === 'object') {
+            try { return JSON.stringify(v, null, 2); } catch { return String(v); }
+        }
+        return String(v);
+    }
+
+    // 尝试把 input 解析为对象；解析失败时回退到原文。
+    function parseInputObject(input) {
+        if (input == null || input === '') return null;
+        if (typeof input === 'object') return input;
+        try { return JSON.parse(input); } catch { return null; }
+    }
+
+    // extractToolSummary 从工具参数中提取关键操作摘要，用于在头部行显示。
+    // 例如 Bash → 显示 command，ReadFile → 显示 path，Grep → 显示 pattern 等。
+    // 返回空字符串表示无摘要（头部不显示额外信息）。
+    function extractToolSummary(name, input) {
+        const obj = parseInputObject(input);
+        let text = '';
+        if (obj && typeof obj === 'object') {
+            switch (name) {
+                case 'Bash':
+                    text = obj.command || '';
+                    break;
+                case 'ReadFile':
+                    text = obj.path || obj.file_path || obj.filePath || '';
+                    break;
+                case 'WriteFile':
+                    text = obj.path || obj.file_path || obj.filePath || '';
+                    break;
+                case 'Grep':
+                    text = obj.pattern || obj.query || '';
+                    if (obj.path) text += ' in ' + obj.path;
+                    break;
+                case 'Glob':
+                    text = obj.pattern || '';
+                    break;
+                default:
+                    // 未知工具：取第一个有值的字符串字段作为摘要
+                    for (const k of Object.keys(obj)) {
+                        const v = obj[k];
+                        if (typeof v === 'string' && v.length > 0 && v.length < 200) {
+                            text = v;
+                            break;
+                        }
+                    }
+            }
+        } else if (typeof input === 'string' && input) {
+            text = input;
+        }
+        // 截断到 200 字符，CSS 会进一步按可用宽度省略
+        if (text.length > 200) text = text.substring(0, 200) + '…';
+        return text;
+    }
+
+    // extractSkillName 从 use_skill 工具的 input 中提取 skill_name 字段。
+    // 用于在工具块头部显示紫色「skill: <name>」徽标。
+    // input 可能为 string（已压缩 JSON）或 object；返回空字符串表示无 skill_name。
+    function extractSkillName(input) {
+        if (input == null || input === '') return '';
+        const obj = parseInputObject(input);
+        if (obj && typeof obj === 'object' && typeof obj.skill_name === 'string') {
+            return obj.skill_name;
+        }
+        return '';
+    }
+
+    // appendToolStartNode 插入"正在执行"占位块并返回 DOM 引用。
+    // 参数 input 接受 string（已压缩 JSON）或 object；StartedAtIso 为 ISO 字符串
+    // 或 null（null 时不显示开始时间，仅显示 running）。
+    // server 可选：远端 MCP 工具时填入 server 名，会在工具块头部展示 mcp:<server> 徽标。
+    function appendToolStartNode(toolUseId, name, input, startedAtIso, server) {
+        const empty = dom.messages.querySelector('.messages-empty');
+        if (empty) empty.remove();
+        hideThinking();
+
+        const wrap = document.createElement('div');
+        wrap.className = 'message-tool';
+        wrap.dataset.toolUseId = toolUseId;
+        wrap.dataset.status = 'running';
+        wrap.dataset.expanded = 'false';
+
+        // 头部：图标 + 工具名 + 状态徽章 + 耗时（运行中显示开始时间） + 折叠箭头
+        const header = document.createElement('div');
+        header.className = 'message-tool-header';
+        header.addEventListener('click', () => {
+            wrap.dataset.expanded = (wrap.dataset.expanded === 'true') ? 'false' : 'true';
+        });
+
+        const icon = document.createElement('span');
+        icon.className = 'message-tool-icon';
+        icon.textContent = TOOL_ICON[name] || TOOL_ICON_FALLBACK;
+        header.appendChild(icon);
+
+        const nameEl = document.createElement('span');
+        nameEl.className = 'message-tool-name';
+        nameEl.textContent = name;
+        header.appendChild(nameEl);
+
+        // Step 8:远端 MCP 工具时,在 name 后追加 server 来源徽标
+        if (server) {
+            const mcpBadge = document.createElement('span');
+            mcpBadge.className = 'mcp-server-badge';
+            mcpBadge.dataset.mcpServer = server;
+            mcpBadge.title = 'MCP 远端工具,来源 server=' + server;
+            mcpBadge.textContent = 'mcp: ' + server;
+            header.appendChild(mcpBadge);
+        }
+
+        // Step 10 Task 6:use_skill 工具时,在 name 后追加紫色「skill」徽标
+        // 徽标内容含 skill_name（从 input.skill_name 提取），便于用户一眼看到
+        // LLM 调用了哪个 Skill。徽标样式与 MCP 徽标同族（紫色），视觉上与
+        // "远端 vs 复合能力"两类来源对应。
+        if (name === 'use_skill') {
+            const skillName = extractSkillName(input);
+            if (skillName) {
+                const skillBadge = document.createElement('span');
+                skillBadge.className = 'skill-tool-badge';
+                skillBadge.dataset.skillName = skillName;
+                skillBadge.title = 'Skill 工具调用,目标 Skill=' + skillName;
+                skillBadge.textContent = 'skill: ' + skillName;
+                header.appendChild(skillBadge);
+            }
+        }
+
+        // 操作摘要：在头部行显示工具正在执行的具体命令/路径等关键信息
+        const summary = document.createElement('span');
+        summary.className = 'message-tool-summary';
+        summary.textContent = extractToolSummary(name, input);
+        header.appendChild(summary);
+
+        const status = document.createElement('span');
+        status.className = 'message-tool-status';
+        status.textContent = TOOL_STATUS_LABEL.running;
+        header.appendChild(status);
+
+        const dur = document.createElement('span');
+        dur.className = 'message-tool-duration';
+        dur.textContent = startedAtIso ? formatStartedAt(startedAtIso) : '';
+        header.appendChild(dur);
+
+        // Step 1.4：操作按钮容器。初始为空，由 updateToolEndNode 根据
+        // 工具名 + status 决定是否注入「查看改动」等动作按钮。
+        // 用 margin-left:auto 推到右侧（toggle 紧跟其后在最右）。
+        const actions = document.createElement('span');
+        actions.className = 'message-tool-actions';
+        actions.dataset.toolActions = '1';
+        header.appendChild(actions);
+
+        const toggle = document.createElement('span');
+        toggle.className = 'message-tool-toggle';
+        toggle.setAttribute('aria-hidden', 'true');
+        header.appendChild(toggle);
+
+        // 内容包裹容器：将 header 和 details 纵向排列，避免 flex row 布局挤压
+        const content = document.createElement('div');
+        content.className = 'message-tool-content';
+        content.appendChild(header);
+
+        // 折叠区：参数 + 输出（运行时仅参数填了；end 时再补输出）
+        const details = document.createElement('div');
+        details.className = 'message-tool-details';
+
+        const paramObj = parseInputObject(input);
+        if (paramObj && typeof paramObj === 'object') {
+            const sec = document.createElement('div');
+            sec.className = 'message-tool-section';
+            const label = document.createElement('span');
+            label.className = 'message-tool-section-label';
+            label.textContent = 'Arguments';
+            sec.appendChild(label);
+            const pre = document.createElement('pre');
+            pre.className = 'message-tool-input';
+            try { pre.textContent = JSON.stringify(paramObj, null, 2); }
+            catch { pre.textContent = formatToolArg(input); }
+            sec.appendChild(pre);
+            details.appendChild(sec);
+        } else if (typeof input === 'string' && input) {
+            const sec = document.createElement('div');
+            sec.className = 'message-tool-section';
+            const label = document.createElement('span');
+            label.className = 'message-tool-section-label';
+            label.textContent = 'Arguments';
+            sec.appendChild(label);
+            const pre = document.createElement('pre');
+            pre.className = 'message-tool-input';
+            pre.textContent = input;
+            sec.appendChild(pre);
+            details.appendChild(sec);
+        }
+
+        content.appendChild(details);
+        wrap.appendChild(content);
+        dom.messages.appendChild(wrap);
+        return wrap;
+    }
+
+    // updateToolEndNode 把工具块从 running 切到 done/failed/aborted/timeout。
+    // 同时填充 output、设置耗时徽章。如已有 output 节则替换为最新值。
+    function updateToolEndNode(node, endPayload) {
+        if (!node) return;
+        const status = endPayload.status || (endPayload.is_error ? 'error' : 'completed');
+        node.dataset.status = status;
+        // 保持折叠：参数和 output 默认不展开，用户可点击 header 手动查看详情
+        node.dataset.expanded = 'false';
+
+        const statusEl = node.querySelector('.message-tool-status');
+        if (statusEl) {
+            statusEl.textContent = TOOL_STATUS_LABEL[status] || status;
+        }
+        const durEl = node.querySelector('.message-tool-duration');
+        if (durEl) {
+            durEl.textContent = formatDuration(endPayload.duration_ms);
+        }
+        const nameEl = node.querySelector('.message-tool-name');
+        if (nameEl && endPayload.name) {
+            nameEl.textContent = endPayload.name;
+        }
+
+        // 找到或创建 output 节
+        const details = node.querySelector('.message-tool-details');
+        if (!details) return;
+        let outSec = details.querySelector('.message-tool-section-output');
+        if (!outSec) {
+            outSec = document.createElement('div');
+            outSec.className = 'message-tool-section message-tool-section-output';
+            const label = document.createElement('span');
+            label.className = 'message-tool-section-label';
+            label.textContent = 'Output';
+            outSec.appendChild(label);
+            const pre = document.createElement('pre');
+            pre.className = 'message-tool-output';
+            outSec.appendChild(pre);
+            details.appendChild(outSec);
+        }
+        const pre = outSec.querySelector('pre');
+        if (pre) {
+            pre.textContent = (endPayload.output == null) ? '' : String(endPayload.output);
+            pre.classList.toggle('message-tool-output-error', !!endPayload.is_error);
+        }
+
+        // Step 1.4：按工具名 + status 注入头部动作按钮。
+        // 仅 WriteFile/EditFile 且 status==='completed' 时显示「查看改动」。
+        // 失败 / 超时 / 中断不显示（无 diff 可看）。
+        const toolName = endPayload.name || (node.querySelector('.message-tool-name')?.textContent || '');
+        if (status === 'completed' && isFileEditingTool(toolName)) {
+            const actions = node.querySelector('.message-tool-actions');
+            if (actions) {
+                attachViewDiffButton(actions, node.dataset.toolUseId);
+            }
+        }
+
+        // Step 8:同步/更新 server 来源徽标。end 消息可能携带 server 字段(用于 start 未带 server 的兜底)
+        if (endPayload.server) {
+            ensureMCPServerBadge(node, endPayload.server);
+        }
+    }
+
+    function onSubAgentTaskEvent(p) {
+        const task = p && p.task;
+        if (!task || !task.id) return;
+        if (isSubAgentTerminal(task.status)) {
+            delete state._activeSubAgentIds[task.id];
+        } else {
+            state._activeSubAgentIds[task.id] = true;
+        }
+        let node = state._subAgentById[task.id];
+        if (!node) {
+            finalizeAssistantMessage();
+            node = appendSubAgentNode(task, p.event);
+            state._subAgentById[task.id] = node;
+        } else {
+            updateSubAgentNode(node, task, p.event);
+        }
+        renderSendButton();
+        scrollToBottomIfNeeded();
+    }
+
+    function appendSubAgentNode(task, eventType) {
+        const empty = dom.messages.querySelector('.messages-empty');
+        if (empty) empty.remove();
+
+        const wrap = document.createElement('div');
+        wrap.className = 'message-subagent';
+        wrap.dataset.taskId = task.id || '';
+        wrap.dataset.status = task.status || 'queued';
+        wrap.dataset.expanded = 'false';
+
+        const content = document.createElement('div');
+        content.className = 'message-subagent-content';
+
+        const header = document.createElement('div');
+        header.className = 'message-subagent-header';
+        header.addEventListener('click', () => {
+            wrap.dataset.expanded = (wrap.dataset.expanded === 'true') ? 'false' : 'true';
+        });
+
+        const icon = document.createElement('span');
+        icon.className = 'message-subagent-icon';
+        icon.textContent = 'SA';
+        header.appendChild(icon);
+
+        const name = document.createElement('span');
+        name.className = 'message-subagent-name';
+        name.textContent = 'SubAgent';
+        header.appendChild(name);
+
+        const typeBadge = document.createElement('span');
+        typeBadge.className = 'message-subagent-badge message-subagent-type';
+        header.appendChild(typeBadge);
+
+        const roleBadge = document.createElement('span');
+        roleBadge.className = 'message-subagent-badge message-subagent-role';
+        header.appendChild(roleBadge);
+
+        const summary = document.createElement('span');
+        summary.className = 'message-subagent-summary';
+        header.appendChild(summary);
+
+        const status = document.createElement('span');
+        status.className = 'message-subagent-status';
+        header.appendChild(status);
+
+        const dur = document.createElement('span');
+        dur.className = 'message-subagent-duration';
+        header.appendChild(dur);
+
+        const toggle = document.createElement('span');
+        toggle.className = 'message-subagent-toggle';
+        toggle.setAttribute('aria-hidden', 'true');
+        header.appendChild(toggle);
+
+        const details = document.createElement('div');
+        details.className = 'message-subagent-details';
+
+        content.appendChild(header);
+        content.appendChild(details);
+        wrap.appendChild(content);
+        dom.messages.appendChild(wrap);
+        updateSubAgentNode(wrap, task, eventType);
+        return wrap;
+    }
+
+    function updateSubAgentNode(node, task, eventType) {
+        if (!node || !task) return;
+        const previousStatus = node.dataset.status || 'queued';
+        const status = task.status || previousStatus;
+        const becameTerminal = !isSubAgentTerminal(previousStatus) && isSubAgentTerminal(status);
+        node.dataset.status = status;
+        node.dataset.type = task.type || '';
+        node.dataset.background = task.background ? 'true' : 'false';
+
+        if (becameTerminal) {
+            node.dataset.notified = 'true';
+        }
+
+        const typeBadge = node.querySelector('.message-subagent-type');
+        if (typeBadge) typeBadge.textContent = task.type || 'defined';
+        const roleBadge = node.querySelector('.message-subagent-role');
+        if (roleBadge) roleBadge.textContent = task.role_name || 'unknown';
+        const summary = node.querySelector('.message-subagent-summary');
+        if (summary) summary.textContent = subAgentSummary(task, eventType);
+        const statusEl = node.querySelector('.message-subagent-status');
+        if (statusEl) statusEl.textContent = SUBAGENT_STATUS_LABEL[status] || status;
+        const dur = node.querySelector('.message-subagent-duration');
+        if (dur) dur.textContent = subAgentDuration(task);
+
+        const details = node.querySelector('.message-subagent-details');
+        if (details) renderSubAgentDetails(details, task);
+    }
+
+    function subAgentSummary(task, eventType) {
+        const prompt = task.trace?.prompt || task.prompt || {};
+        const parts = [];
+        if (isSubAgentTerminal(task.status)) {
+            parts.push(subAgentCompletionTitle(task));
+            parts.push('结果已返回主 Agent');
+        } else {
+            if (prompt.task) parts.push(prompt.task);
+            if (task.background) parts.push(task.background_reason ? `background:${task.background_reason}` : 'background');
+            if (eventType && eventType !== task.status) parts.push(String(eventType));
+        }
+        if (task.error) parts.push(task.error);
+        const text = parts.filter(Boolean).join(' · ');
+        return text.length > 220 ? text.slice(0, 220) + '…' : text;
+    }
+
+    function subAgentDuration(task) {
+        if (task.started_at && task.ended_at) {
+            const start = new Date(task.started_at).getTime();
+            const end = new Date(task.ended_at).getTime();
+            if (!isNaN(start) && !isNaN(end) && end >= start) return formatDuration(end - start);
+        }
+        if (task.started_at) return formatStartedAt(task.started_at);
+        return '';
+    }
+
+    function renderSubAgentDetails(details, task) {
+        details.innerHTML = '';
+        const prompt = task.trace?.prompt || task.prompt || {};
+        appendSubAgentSection(details, 'Structured Prompt', prompt);
+    }
+
+    function isSubAgentTerminal(status) {
+        return status === 'completed' || status === 'failed' || status === 'canceled';
+    }
+
+    function subAgentCompletionTitle(task) {
+        if (task.status === 'failed') return 'SubAgent 执行失败';
+        if (task.status === 'canceled') return 'SubAgent 已取消';
+        return 'SubAgent 已完成';
+    }
+
+    function appendSubAgentSection(parent, labelText, value, isError) {
+        const sec = document.createElement('div');
+        sec.className = 'message-subagent-section';
+        const label = document.createElement('span');
+        label.className = 'message-subagent-section-label';
+        label.textContent = labelText;
+        sec.appendChild(label);
+        const pre = document.createElement('pre');
+        pre.className = 'message-subagent-pre';
+        if (isError) pre.classList.add('message-subagent-pre-error');
+        pre.textContent = formatSubAgentValue(value);
+        sec.appendChild(pre);
+        parent.appendChild(sec);
+    }
+
+    function formatSubAgentValue(value) {
+        if (value == null || value === '') return '（空）';
+        if (typeof value === 'string') return value;
+        try { return JSON.stringify(value, null, 2); }
+        catch { return String(value); }
+    }
+    function onMemoryReviewEvent(p) {
+        if (!p || !p.review_id || !p.status) return;
+        let node = state._memoryReviewById[p.review_id];
+        if (!node) {
+            node = appendMemoryReviewNode(p);
+            state._memoryReviewById[p.review_id] = node;
+        } else {
+            updateMemoryReviewNode(node, p);
+        }
+        scrollToBottomIfNeeded();
+    }
+
+    function appendMemoryReviewNode(p) {
+        const empty = dom.messages.querySelector('.messages-empty');
+        if (empty) empty.remove();
+
+        const wrap = document.createElement('div');
+        wrap.className = 'message-memory';
+        wrap.dataset.reviewId = p.review_id;
+        wrap.dataset.status = p.status || 'started';
+
+        const content = document.createElement('div');
+        content.className = 'message-memory-content';
+
+        const header = document.createElement('div');
+        header.className = 'message-memory-header';
+
+        const icon = document.createElement('span');
+        icon.className = 'message-memory-icon';
+        icon.textContent = 'M';
+        header.appendChild(icon);
+
+        const name = document.createElement('span');
+        name.className = 'message-memory-name';
+        name.textContent = '自动记忆';
+        header.appendChild(name);
+
+        const summary = document.createElement('span');
+        summary.className = 'message-memory-summary';
+        header.appendChild(summary);
+
+        const status = document.createElement('span');
+        status.className = 'message-memory-status';
+        header.appendChild(status);
+
+        const dur = document.createElement('span');
+        dur.className = 'message-memory-duration';
+        header.appendChild(dur);
+
+        content.appendChild(header);
+        wrap.appendChild(content);
+        dom.messages.appendChild(wrap);
+        updateMemoryReviewNode(wrap, p);
+        return wrap;
+    }
+
+    function updateMemoryReviewNode(node, p) {
+        if (!node || !p) return;
+        const status = p.status || node.dataset.status || 'started';
+        node.dataset.status = status;
+        const summary = node.querySelector('.message-memory-summary');
+        if (summary) summary.textContent = memoryReviewSummary(p);
+        const statusEl = node.querySelector('.message-memory-status');
+        if (statusEl) statusEl.textContent = memoryReviewStatusLabel(status);
+        const dur = node.querySelector('.message-memory-duration');
+        if (dur) dur.textContent = p.duration_ms ? formatDuration(p.duration_ms) : '';
+    }
+
+    function memoryReviewStatusLabel(status) {
+        switch (status) {
+            case 'started': return 'running';
+            case 'completed': return 'saved';
+            case 'no_decision': return 'checked';
+            case 'error': return 'failed';
+            default: return status || 'review';
+        }
+    }
+
+    function memoryReviewSummary(p) {
+        switch (p.status) {
+            case 'started':
+                return '正在回顾本轮对话，判断是否需要沉淀长期记忆';
+            case 'completed':
+                return (p.applied || 0) > 0
+                    ? `已沉淀 ${p.applied} 条长期记忆`
+                    : '回顾完成，未写入新的记忆';
+            case 'no_decision':
+                return '已回顾，本轮没有需要沉淀的长期记忆';
+            case 'error':
+                return p.err ? ('自动记忆回顾失败：' + p.err) : '自动记忆回顾失败';
+            default:
+                return '自动记忆状态更新';
+        }
+    }
+
+    // ensureMCPServerBadge 注入或更新工具块头部的 MCP server 徽标。
+    //
+    // 行为:
+    //   - 已有徽标(可能与新 server 不同,如网络抖动)→ 替换 text
+    //   - 无徽标 → 在 name 元素后插入一个 <span class="mcp-server-badge">
+    //   - server 为空时不操作(内置工具不应展示徽标)
+    //
+    // DOM 复用:通过 data-mcp-server 属性去重,避免重复插入。
+    function ensureMCPServerBadge(node, server) {
+        if (!node || !server) return;
+        const header = node.querySelector('.message-tool-header');
+        if (!header) return;
+        const nameEl = header.querySelector('.message-tool-name');
+        if (!nameEl) return;
+        // 找现有徽标
+        let badge = header.querySelector('.mcp-server-badge');
+        if (badge) {
+            badge.textContent = 'mcp: ' + server;
+            badge.dataset.mcpServer = server;
+            return;
+        }
+        // 在 name 元素后插入(视觉上紧跟工具名)
+        badge = document.createElement('span');
+        badge.className = 'mcp-server-badge';
+        badge.dataset.mcpServer = server;
+        badge.title = 'MCP 远端工具,来源 server=' + server;
+        badge.textContent = 'mcp: ' + server;
+        if (nameEl.nextSibling) {
+            header.insertBefore(badge, nameEl.nextSibling);
+        } else {
+            header.appendChild(badge);
+        }
+    }
+
+    // isFileEditingTool 判断工具是否为「文件编辑类」——只有 WriteFile/EditFile
+    // 会向 FileDiffStore 写入记录，其他工具（Bash/Glob/Grep/ReadFile）无 diff。
+    function isFileEditingTool(name) {
+        return name === 'WriteFile' || name === 'EditFile';
+    }
+
+    // attachViewDiffButton 向 actions 容器插入「查看改动」按钮。
+    // 幂等：重复调用不会重复插入（已存在则替换文本；此处一般只调一次）。
+    // stopPropagation 防止点击冒泡触发 header 的折叠 toggle。
+    function attachViewDiffButton(actions, toolUseId) {
+        // 幂等：避免重复插入
+        let btn = actions.querySelector('[data-action="view-diff"]');
+        if (!btn) {
+            btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'message-tool-action-btn';
+            btn.dataset.action = 'view-diff';
+            btn.title = '查看本次调用的文件改动（左右双栏 diff）';
+            btn.innerHTML = `
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M2 4h7"></path>
+                    <path d="M2 8h10"></path>
+                    <path d="M2 12h5"></path>
+                    <path d="M11 12l3-3-3-3"></path>
+                </svg>
+                <span>查看改动</span>
+            `;
+            actions.appendChild(btn);
+        }
+        // 每次重新绑定（replace node 后旧 handler 失效），使用 cloneNode 简化逻辑
+        const fresh = btn.cloneNode(true);
+        btn.parentNode.replaceChild(fresh, btn);
+        fresh.addEventListener('click', (ev) => {
+            ev.stopPropagation();   // 防止冒泡触发 header 折叠
+            ev.preventDefault();
+            openFileDiffModal(toolUseId);
+        });
+    }
+
+    // formatDuration 把毫秒数格式化为 "Xms" / "X.Ys"。
+    function formatDuration(ms) {
+        if (ms == null) return '';
+        if (ms < 1000) return `${ms}ms`;
+        return `${(ms / 1000).toFixed(2)}s`;
+    }
+
+    // formatStartedAt 把 ISO 时间格式化为 HH:MM:SS。
+    function formatStartedAt(iso) {
+        try {
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return '';
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        } catch { return ''; }
+    }
+
+    // ---- Thinking 占位节点（3 个弹跳圆点 + "Thinking…" 文字） ----
+    // 在用户发消息后立即插入，在首个 stream_chunk 到达时由 hideThinking 移除。
+    function showThinking() {
+        if (state._thinkingWrap) return;
+        // 清空空状态
+        const empty = dom.messages.querySelector('.messages-empty');
+        if (empty) empty.remove();
+
+        const wrap = document.createElement('div');
+        wrap.className = 'message message-assistant thinking-message';
+        wrap.dataset.thinking = '1';
+
+        const avatar = document.createElement('div');
+        avatar.className = 'message-avatar';
+        const icon = document.createElement('img');
+        icon.className = 'message-avatar-icon';
+        icon.src = APP_ICON_SRC;
+        icon.alt = '';
+        icon.setAttribute('aria-hidden', 'true');
+        avatar.appendChild(icon);
+        wrap.appendChild(avatar);
+
+        const bubble = document.createElement('div');
+        bubble.className = 'message-bubble';
+        bubble.innerHTML = `
+            <span class="thinking-indicator" aria-label="Agent 正在思考">
+                <span class="thinking-dot"></span>
+                <span class="thinking-dot"></span>
+                <span class="thinking-dot"></span>
+                <span class="thinking-text">Thinking…</span>
+            </span>`;
+        wrap.appendChild(bubble);
+
+        dom.messages.appendChild(wrap);
+        state._thinkingWrap = wrap;
+        scrollToBottomIfNeeded();
+    }
+
+    function hideThinking() {
+        if (state._thinkingWrap) {
+            state._thinkingWrap.remove();
+            state._thinkingWrap = null;
+        }
+    }
+
+    function appendStreamDelta(delta) {
+        // 流式 chunk 追加：保证状态机只有一个"in-progress"助手消息
+        const isFirstChunk = !state._streamingWrap;
+        if (isFirstChunk) {
+            // 清空空状态 + thinking 占位
+            const empty = dom.messages.querySelector('.messages-empty');
+            if (empty) empty.remove();
+            hideThinking();
+            state._streamingWrap = appendMessageNode('assistant', '', true);
+            state._streamingBuffer = '';
+            state._revealedLen = 0;
+        }
+        state._streamingBuffer += delta;
+
+        // 启动打字机动画（仅首个 delta 或动画已停止时触发）
+        if (!state._typewriterRafId) {
+            state._typewriterRafId = requestAnimationFrame(typewriterTick);
+        }
+    }
+
+    function finalizeAssistantMessage() {
+        if (!state._streamingWrap) return;
+
+        // 1. 停止打字机动画
+        if (state._typewriterRafId) {
+            cancelAnimationFrame(state._typewriterRafId);
+            state._typewriterRafId = null;
+        }
+
+        const bubble = state._streamingWrap.querySelector('.message-bubble');
+        const text = state._streamingBuffer || '';
+
+        // 2. 最终渲染：使用 renderMarkdown（不带光标），确保最终内容干净
+        if (text && bubble) {
+            bubble.innerHTML = renderMarkdown(text);
+        }
+
+        // 3. 对已渲染的内容执行最终增强：hljs 语法高亮、代码块 header（复制按钮）、JSON 校验
+        enhanceCodeBlocks(bubble);
+
+        // 4. 固化为普通消息
+        state.messages.push({ role: 'assistant', content: text });
+        state._streamingWrap = null;
+        state._streamingBuffer = '';
+        state._revealedLen = 0;
+        scrollToBottomIfNeeded();
+    }
+
+    // ---- 流式渲染核心：打字机效果 ----
+    // 核心思路：把「收到了多少」和「显示了多少」解耦。
+    // appendStreamDelta 只负责往缓冲区追加文本；
+    // typewriterTick 每帧匀速推进"揭示光标"，逐步展示缓冲区内容。
+    // 无论 LLM token 到达多快，用户看到的都是匀速的打字机输出。
+    // 流结束后由 finalizeAssistantMessage 立即显示全部剩余内容。
+
+    /** 每帧推进的字符数（基础速度） */
+    const TYPEWRITER_BASE_SPEED = 2;
+    /** 自适应加速阈值：积压超过此值时提速追赶 */
+    const TYPEWRITER_SPEEDUP_THRESHOLD = 30;
+    /** 每帧最大推进字符数（防止长响应结尾时追赶太猛） */
+    const TYPEWRITER_MAX_SPEED = 24;
+
+    /**
+     * typewriterTick — 打字机动画的每帧回调。
+     * 推进"已揭示长度"，渲染可见部分（带光标），如仍有积压则调度下一帧。
+     */
+    function typewriterTick() {
+        state._typewriterRafId = null;
+        if (!state._streamingWrap || !state._streamingBuffer) return;
+
+        const bufferLen = state._streamingBuffer.length;
+        if (state._revealedLen >= bufferLen) return; // 已追上，等待新 delta 触发
+
+        // 自适应速度：积压越多越快，避免长响应追赶太慢
+        const backlog = bufferLen - state._revealedLen;
+        const speed = backlog > TYPEWRITER_SPEEDUP_THRESHOLD
+            ? Math.min(backlog, TYPEWRITER_MAX_SPEED)
+            : TYPEWRITER_BASE_SPEED;
+        state._revealedLen = Math.min(state._revealedLen + speed, bufferLen);
+
+        // 取已揭示部分的文本，走 Markdown 解析 + DOMPurify 过滤
+        const visibleText = state._streamingBuffer.substring(0, state._revealedLen);
+        const bubble = state._streamingWrap.querySelector('.message-bubble');
+        if (bubble) {
+            const html = streamingRenderMarkdown(visibleText);
+            bubble.innerHTML = html + '<span class="cursor" aria-hidden="true"></span>';
+        }
+
+        // 直接滚动（已在 rAF 回调内，无需再套一层 rAF）
+        if (!state.userScrolledUp) {
+            dom.messages.scrollTop = dom.messages.scrollHeight;
+        }
+
+        // 还有未显示的内容，调度下一帧
+        if (state._revealedLen < bufferLen) {
+            state._typewriterRafId = requestAnimationFrame(typewriterTick);
+        }
+    }
+
+    /**
+     * closeOpenFences — 检测文本中未闭合的围栏代码块，自动在末尾补上闭合标记。
+     * 确保 marked.parse 对不完整代码块也能生成 <pre><code> 容器，而非当作纯文本。
+     *
+     * 支持两种围栏标记：```（反引号）和 ~~~（波浪号）。
+     * 仅处理位于行首（可选缩进）的围栏标记。
+     *
+     * @param {string} text - 已累积的流式文本
+     * @returns {string} - 处理后的文本（可能追加了闭合标记）
+     */
+    function closeOpenFences(text) {
+        // 按行扫描，追踪每种围栏的开启/闭合状态
+        const lines = text.split('\n');
+        // 用栈追踪当前打开的围栏：每个元素为围栏标记的字符（` 或 ~）
+        const fenceStack = [];
+        const fenceRe = /^(\s{0,3})(```+|~~~+)/;
+
+        for (const line of lines) {
+            const m = line.match(fenceRe);
+            if (m) {
+                const fenceChar = m[2][0]; // ` 或 ~
+                if (fenceStack.length > 0 && fenceStack[fenceStack.length - 1] === fenceChar) {
+                    // 闭合当前围栏
+                    fenceStack.pop();
+                } else {
+                    // 开启新围栏
+                    fenceStack.push(fenceChar);
+                }
+            }
+        }
+
+        // 栈中剩余的即为未闭合的围栏，逐个补上闭合标记
+        let result = text;
+        for (const fenceChar of fenceStack) {
+            result += '\n' + fenceChar.repeat(3);
+        }
+        return result;
+    }
+
+    /**
+     * htmlDecode — 将 marked 输出中的 HTML 实体还原为原始字符。
+     * marked 会将 code 块内的 < > & " ' 转义，传给 hljs.highlight() 前需还原。
+     * 使用纯字符串替换，避免创建临时 DOM 元素的额外开销。
+     *
+     * @param {string} str - 含 HTML 实体的字符串
+     * @returns {string} - 还原后的字符串
+     */
+    function htmlDecode(str) {
+        return str
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'");
+    }
+
+    /**
+     * highlightCodeInHTML — 对 HTML 字符串中的代码块应用 hljs 语法高亮。
+     *
+     * 在 marked.parse() 之后、DOMPurify.sanitize() 之前调用。
+     * 使用 hljs.highlight()（字符串 API）而非 hljs.highlightElement()（DOM API），
+     * 避免每帧 innerHTML 全量替换时的 DOM 节点销毁/重建开销。
+     *
+     * 工作流程：
+     *   1. 正则匹配 <code class="language-xxx">content</code>
+     *   2. htmlDecode 还原转义字符
+     *   3. hljs.highlight(rawCode, {language}) 得到带 <span class="hljs-keyword"> 的高亮 HTML
+     *   4. 替换回原位，追加 hljs class 使 CSS 主题生效
+     *
+     * @param {string} html - marked.parse() 输出的 HTML 字符串
+     * @returns {string} - 含高亮 token 的 HTML 字符串（未 sanitize）
+     */
+    function highlightCodeInHTML(html) {
+        if (!window.hljs) return html;
+        return html.replace(
+            /<code class="language-([\w+-]+)">([\s\S]*?)<\/code>/g,
+            (match, lang, codeHtml) => {
+                const rawCode = htmlDecode(codeHtml);
+                try {
+                    const result = window.hljs.highlight(rawCode, { language: lang });
+                    return `<code class="language-${lang} hljs">${result.value}</code>`;
+                } catch {
+                    // 语言不被 hljs 支持时原样返回
+                    return match;
+                }
+            }
+        );
+    }
+
+    /**
+     * streamingRenderMarkdown — 流式渲染专用的 Markdown 解析。
+     * 与 renderMarkdown 的区别：
+     *   1. 先预处理未闭合代码块（closeOpenFences）
+     *   2. marked 解析后对代码块内联 hljs 语法高亮（highlightCodeInHTML）
+     *   3. 最后 DOMPurify 过滤
+     * XSS 防护规则与 renderMarkdown 完全一致，安全不降级。
+     *
+     * @param {string} text - 已累积的流式文本（可能含未闭合围栏）
+     * @returns {string} - 经高亮 + DOMPurify 过滤的安全 HTML
+     */
+    function streamingRenderMarkdown(text) {
+        if (!text) return '';
+        try {
+            const preprocessed = closeOpenFences(text);
+            const raw = window.marked.parse(preprocessed);
+            // 在 DOMPurify 之前注入 hljs 高亮 token，让代码块实时带颜色
+            const highlighted = highlightCodeInHTML(raw);
+            return window.DOMPurify.sanitize(highlighted, {
+                ADD_ATTR: ['class'],
+                FORBID_TAGS: ['style', 'iframe', 'script'],
+            });
+        } catch (err) {
+            console.error('流式 Markdown 渲染失败', err);
+            return escapeHTML(text);
+        }
+    }
+
+    // ---- Markdown 渲染 ----
+    // 顺序：marked.parse → DOMPurify.sanitize；hljs 不在字符串阶段处理，
+    // 避免 DOMPurify 误伤 hljs 的 token span。XSS 防护 + 语法高亮职责分离。
+    function renderMarkdown(text) {
+        if (!text) return '';
+        try {
+            const raw = window.marked.parse(text);
+            return window.DOMPurify.sanitize(raw, {
+                // 保留 class：hljs 依赖 class="hljs-keyword" 等做样式
+                ADD_ATTR: ['class'],
+                // 显式禁止高危标签，<img onerror> 等通过 on* 过滤默认就拦了
+                FORBID_TAGS: ['style', 'iframe', 'script'],
+            });
+        } catch (err) {
+            console.error('Markdown 渲染失败', err);
+            return escapeHTML(text);
+        }
+    }
+
+    // ---- 代码块增强（高亮 + 语言标签 + 复制 + JSON 校验） ----
+    // 仅在 bubble.innerHTML 赋值后调用一次。流式响应过程中不调用（避免半截代码闪烁）。
+
+    // 解析 ``` 围栏代码块的语言；无则返回 'plain'。
+    function extractCodeLang(codeEl) {
+        const m = (codeEl.className || '').match(/language-([\w+-]+)/);
+        return m ? m[1].toLowerCase() : 'plain';
+    }
+
+    // 给单个 <pre> 节点注入顶部 header（语言标签 + 复制按钮）。
+    // 全程 createElement，零字符串拼接，避免二次 XSS。
+    function buildCodeHeader(lang, codeEl) {
+        const header = document.createElement('div');
+        header.className = 'code-block-header';
+
+        const langLabel = document.createElement('span');
+        langLabel.className = 'code-lang';
+        langLabel.textContent = lang;
+        header.appendChild(langLabel);
+
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'copy-btn';
+        copyBtn.textContent = 'Copy';
+        copyBtn.title = '复制代码';
+        copyBtn.addEventListener('click', () => copyCode(codeEl, copyBtn));
+        header.appendChild(copyBtn);
+
+        return header;
+    }
+
+    // 异步复制代码块原文到剪贴板。优先用 navigator.clipboard，
+    // http/老浏览器不可用时回退到 execCommand('copy') + 临时 textarea。
+    async function copyCode(codeEl, btnEl) {
+        // dataset.raw 保留的是 hljs 高亮之前的原文
+        const text = codeEl.dataset.raw || codeEl.textContent || '';
+        let ok = false;
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+                ok = true;
+            }
+        } catch (err) {
+            console.warn('clipboard API 失败，回退 execCommand', err);
+        }
+        if (!ok) {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.top = '0';
+            ta.style.left = '0';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch (err) {
+                console.error('execCommand copy 失败', err);
+            } finally { ta.remove(); }
+        }
+        btnEl.textContent = 'Copied';
+        btnEl.classList.add('is-copied');
+        setTimeout(() => {
+            btnEl.textContent = 'Copy';
+            btnEl.classList.remove('is-copied');
+        }, 1500);
+    }
+
+    // 对 ```json 块做格式校验。
+    // 成功：在 header 末尾追加 .json-valid 角标。
+    // 失败：在 pre 后追加 .json-error 条，文字含行/列信息，不替换高亮。
+    function validateJsonBlock(codeEl, preEl) {
+        const raw = codeEl.dataset.raw || '';
+        if (!raw.trim()) return;
+        try {
+            JSON.parse(raw);
+            const badge = document.createElement('span');
+            badge.className = 'json-valid';
+            badge.textContent = '✓ valid';
+            const header = preEl.querySelector('.code-block-header');
+            if (header) header.appendChild(badge);
+        } catch (err) {
+            // V8 / SpiderMonkey 的 JSON.parse 错误信息形如：
+            //   "Unexpected token } in JSON at position 22"
+            // 从中抽 position 算 row/col。位置不可得时回退到 "未知位置"。
+            const posMatch = (err && err.message || '').match(/position\s+(\d+)/i);
+            let row = 1, col = 1;
+            if (posMatch) {
+                const pos = Number(posMatch[1]);
+                const before = raw.slice(0, pos);
+                row = before.split('\n').length;
+                col = pos - (before.lastIndexOf('\n'));
+            } else {
+                row = 0; col = 0;
+            }
+            const bar = document.createElement('div');
+            bar.className = 'json-error';
+            bar.dataset.row = String(row);
+            bar.dataset.col = String(col);
+            const posText = row > 0 ? `第 ${row} 行 第 ${col} 列` : '';
+            bar.textContent = posText
+                ? `JSON 错误 · ${posText} · ${err && err.message ? err.message : String(err)}`
+                : `JSON 错误 · ${err && err.message ? err.message : String(err)}`;
+            preEl.parentNode.insertBefore(bar, preEl.nextSibling);
+        }
+    }
+
+    // enhanceCodeBlocks 是代码块增强的总入口。
+    // 关键时序：先 dataset.raw 存原文（hljs 会改 textContent），再高亮，再 JSON 校验。
+    function enhanceCodeBlocks(bubbleEl) {
+        if (!bubbleEl) return;
+        const blocks = bubbleEl.querySelectorAll('pre > code');
+        if (!blocks.length) return;
+        for (const codeEl of blocks) {
+            const preEl = codeEl.parentElement;
+            if (!preEl) continue;
+            const lang = extractCodeLang(codeEl);
+
+            // 关键：在 hljs.highlightElement 之前保存原文
+            codeEl.dataset.raw = codeEl.textContent;
+
+            preEl.classList.add('code-block');
+            preEl.appendChild(buildCodeHeader(lang, codeEl));
+
+            // hljs.highlightElement 找不到 language 时不强行加 hljs 类（fallback plain）
+            if (lang !== 'plain' && window.hljs) {
+                try {
+                    window.hljs.highlightElement(codeEl);
+                } catch (err) {
+                    console.warn('hljs.highlightElement 失败', err);
+                }
+            }
+            if (lang === 'json') {
+                validateJsonBlock(codeEl, preEl);
+            }
+        }
+    }
+
+    // ---- 上下文进度条 ----
+    function renderCtxBar() {
+        const v = state.ctx.percentLeft;
+        dom.ctxPercent.textContent = `${v}%`;
+        if (!dom.ctxBar) {
+            // 在 ctx-percent 元素后插入进度条
+            const bar = document.createElement('div');
+            bar.className = 'ctx-bar';
+            bar.innerHTML = '<div class="ctx-bar-fill"></div>';
+            const stat = dom.ctxPercent.closest('.inputbar-stat');
+            stat.appendChild(bar);
+            dom.ctxBar = bar.firstElementChild;
+        }
+        dom.ctxBar.style.width = `${v}%`;
+        dom.ctxBar.dataset.warning = v < 20 ? 'true' : 'false';
+    }
+
+    // ---- 滚动行为 ----
+
+    function scrollToBottomIfNeeded() {
+        if (state.userScrolledUp) return;
+        requestAnimationFrame(() => {
+            dom.messages.scrollTop = dom.messages.scrollHeight;
+        });
+    }
+
+    function bindScrollWatcher() {
+        dom.messages.addEventListener('scroll', () => {
+            const el = dom.messages;
+            const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+            // 距底部 > 80px 视为"用户向上滚动"
+            state.userScrolledUp = distFromBottom > 80;
+        });
+    }
+
+    // =========================================================================
+    // 输入与 / 命令下拉
+    // =========================================================================
+
+    function onSendClicked() {
+        const raw = dom.input.value;
+        const trimmed = raw.trim();
+        if (!trimmed) return;
+        if (state.streaming) return;
+
+        // /resume <id> 内部命令：直接发 resume_session，不走 LLM
+        // 用 trimmed === '/resume' 或 startsWith('/resume ') 两种形态识别，
+        // 避免 tail 空格被 trim 掉后漏判（如 "/resume "）。
+        if (trimmed === '/resume' || trimmed.startsWith('/resume ')) {
+            const id = trimmed.slice('/resume'.length).trim();
+            if (id) {
+                // /resume 触发的恢复由 onSessionLoaded 收起表格
+                sendWS(MsgType.ResumeSession, { id });
+                dom.input.value = '';
+                updateCharCount();
+                closeSlashDropdown();
+            }
+            // id 为空时不做任何动作，保留输入让用户继续补全
+            return;
+        }
+
+        // Step 10：通用 slash 命令派发（覆盖「直接键入而非下拉选中」场景）
+        // 用户在输入框手敲 "/config-management" 后按 Enter 即可触发对应 Skill。
+        // 匹配规则：trimmed 以 "/" 开头 → 抽取 command token(首个空格之前)→
+        //   1) 在 state.commands 中能找到该 name → 派发:
+        //      - category==='client' → 前端本地逻辑(/sessions 表格 / /skills 模态框)
+        //      - needs_arg===true   → 保留输入(让用户继续补全),不发送任何消息
+        //      - 否则               → 发 slash_command { name, arg }
+        //   2) 找不到 → 不当作 slash 命令,继续走 user_input 流程(走 LLM)
+        // 这样既不破坏「未知 /xxx 走 LLM」的旧行为,又能让 Skill 系统的命令被正确触发。
+        if (trimmed.startsWith('/') && !trimmed.includes('\n')) {
+            const firstSpace = trimmed.indexOf(' ');
+            const name = (firstSpace < 0 ? trimmed : trimmed.slice(0, firstSpace)).trim();
+            const arg = firstSpace < 0 ? '' : trimmed.slice(firstSpace + 1).trim();
+            const entry = state.commands.find(c => c && c.name === name);
+            if (entry) {
+                // /sessions / /skills 等 client 类命令由前端本地逻辑处理
+                if (entry.category === 'client') {
+                    if (name === '/sessions') {
+                        try { openSessionsTable(); } catch (err) { console.error('openSessionsTable 失败', err); }
+                    } else if (name === '/skills') {
+                        try { openSkillsTable(); } catch (err) { console.error('openSkillsTable 失败', err); }
+                    }
+                    dom.input.value = '';
+                    updateCharCount();
+                    closeSlashDropdown();
+                    return;
+                }
+                // needs_arg=true 且用户尚未补全 arg:保留输入让用户继续补全
+                if (entry.needsArg && !arg) {
+                    closeSlashDropdown();
+                    return;
+                }
+                // 其他命令:走专属 MsgType(/new /clear /compact)或通用 slash_command
+                const msgType = state.commandTypeByName[name];
+                try {
+                    if (msgType) {
+                        sendWS(msgType, {});
+                    } else {
+                        const sent = sendWS(MsgType.SlashCommand, { name: name, arg: arg });
+                        if (sent && entry.category === 'skill') {
+                            beginLocalUserTurn(formatSlashCommandDisplay(name, arg));
+                        }
+                    }
+                } catch (err) { console.error('slash send failed', err, name, msgType || MsgType.SlashCommand); }
+                dom.input.value = '';
+                updateCharCount();
+                closeSlashDropdown();
+                return;
+            }
+        }
+
+        // 表格视图打开时，用户开始输入新对话即收起表格
+        if (state.sessionsTableActive) {
+            hideSessionsTable();
+        }
+
+        // 清空空状态
+        const empty = dom.messages.querySelector('.messages-empty');
+        if (empty) empty.remove();
+        // 用户消息节点
+        state.messages.push({ role: 'user', content: raw });
+        appendMessageNode('user', raw, false);
+        scrollToBottomIfNeeded();
+        dom.input.value = '';
+        updateCharCount();
+        closeSlashDropdown();
+        // 立即插入 thinking 占位，标记"等待 assistant 首个 chunk"
+        // 首个 stream_chunk 到达时由 onStreamChunk 移除
+        state.expectingAssistant = true;
+        showThinking();
+        // 发送
+        sendWS(MsgType.UserInput, { text: raw });
+    }
+
+    function updateCharCount() {
+        dom.charCount.textContent = String(dom.input.value.length);
+    }
+
+    function formatSlashCommandDisplay(name, arg) {
+        const tail = (arg || '').trim();
+        return tail ? `${name} ${tail}` : name;
+    }
+
+    function beginLocalUserTurn(text) {
+        if (state.sessionsTableActive) {
+            hideSessionsTable();
+        }
+        const empty = dom.messages.querySelector('.messages-empty');
+        if (empty) empty.remove();
+        state.messages.push({ role: 'user', content: text });
+        appendMessageNode('user', text, false);
+        scrollToBottomIfNeeded();
+        state.expectingAssistant = true;
+        showThinking();
+    }
+
+    // getMatchingCommands 根据当前输入框内容做前缀过滤。
+    // 用户输入 "/" 时返回全部；输入 "/se" 时只返回以 "/se" 起始的命令。
+    // 该函数是下拉显示候选的唯一来源，避免 open / refresh 两条路径走出不同列表。
+    // Step 9.1：数据源改为 state.commands（后端下发的命令清单）。
+    function getMatchingCommands() {
+        const cur = (dom.input.value || '').trim();
+        if (!cur.startsWith('/')) return state.commands.slice();
+        return state.commands.filter(c => (c.name || '').startsWith(cur));
+    }
+
+    function openSlashDropdown() {
+        if (state.slashOpen) return;
+        const matches = getMatchingCommands();
+        // 无候选时不打开下拉，避免空面板
+        if (!matches.length) return;
+
+        const dropdown = document.createElement('div');
+        dropdown.className = 'slash-dropdown';
+        dropdown.id = 'slash-dropdown';
+        dropdown.setAttribute('role', 'listbox');
+        state.slashItems = matches.map((c, i) => {
+            const item = document.createElement('div');
+            item.className = 'slash-item' + (i === 0 ? ' is-selected' : '');
+            // Step 9.1：dataset.cmd 兼容 applySlashCompletion 的 entry.cmd 查找
+            item.dataset.cmd = c.name;
+            item.dataset.index = String(i);
+            item.setAttribute('role', 'option');
+            // Step 10 Task 6：category === 'skill' 时在条目左侧加紫色「skill」小标签
+            // 与 session/context/debug 类别在视觉上区分（spec §E.2）。
+            const tagHTML = c.category === 'skill'
+                ? '<span class="cmd-tag-skill">skill</span>'
+                : '';
+            item.title = c.description || c.name;
+            item.innerHTML = `<span class="slash-cmd">${escapeHTML(c.name)}</span><span class="slash-kind">${tagHTML}</span><span class="slash-desc">${escapeHTML(c.description || '')}</span>`;
+            item.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                applySlashCompletion(c);
+            });
+            dropdown.appendChild(item);
+            return item;
+        });
+        state.slashIndex = 0;
+        state.slashOpen = true;
+        dom.input.parentElement.parentElement.appendChild(dropdown);
+    }
+
+    function closeSlashDropdown() {
+        const d = document.getElementById('slash-dropdown');
+        if (d) d.remove();
+        state.slashOpen = false;
+        state.slashItems = [];
+        state.slashIndex = 0;
+    }
+
+    function updateSlashSelection(delta) {
+        if (!state.slashOpen || !state.slashItems.length) return;
+        state.slashIndex = (state.slashIndex + delta + state.slashItems.length) % state.slashItems.length;
+        let selected = null;
+        for (const it of state.slashItems) {
+            const isSelected = Number(it.dataset.index) === state.slashIndex;
+            it.classList.toggle('is-selected', isSelected);
+            if (isSelected) selected = it;
+        }
+        if (selected) {
+            try {
+                selected.scrollIntoView({ block: 'nearest' });
+            } catch (_) {
+                selected.scrollIntoView(false);
+            }
+        }
+    }
+    // applySlashCompletion 选中候选后的统一入口。
+    //
+    // Step 9.1 路由规则（按 state.commands 一条命令元数据判定）：
+    //   1. category === 'client'：本地逻辑（/sessions → openSessionsTable），不发送 WS
+    //   2. needsArg === true：补全命令名 + 尾随空格到输入框（/resume 走该分支）
+    //      用户继续填参数后按 Enter 提交，由 onSendClicked 识别 "/resume " 前缀发 resume_session
+    //   3. 其他（普通可执行命令）：按 state.commandTypeByName[cmd] 取 MsgType 直接发 WS
+    //
+    // 兼容性兜底：未在 commandTypeByName 中找到映射时，视为未知命令，仅关闭下拉。
+    function applySlashCompletion(entry) {
+        if (!entry || !entry.name) {
+            closeSlashDropdown();
+            return;
+        }
+        const name = entry.name;
+
+        // 1. client 类命令：本地逻辑（如 /sessions → openSessionsTable，/skills → openSkillsTable）
+        if (entry.category === 'client') {
+            closeSlashDropdown();
+            dom.input.value = '';
+            updateCharCount();
+            if (name === '/sessions') {
+                try { openSessionsTable(); }
+                catch (err) { console.error('openSessionsTable 失败', err); }
+            } else if (name === '/skills') {
+                // Step 10 Task 6：/skills 客户端命令触发三档 Skill 列表模态框
+                try { openSkillsTable(); }
+                catch (err) { console.error('openSkillsTable 失败', err); }
+            }
+            // 兜底：未识别的 client 命令不做任何操作
+            return;
+        }
+
+        // 2. needsArg 命令：补全到输入框（用户继续填参数后按 Enter 提交）
+        if (entry.needsArg) {
+            // 与原实现保持一致：/resume 选中后写入 "/resume "（带尾随空格）
+            const tail = name + (name === '/resume' ? ' ' : ' ');
+            dom.input.value = tail;
+            dom.input.setSelectionRange(tail.length, tail.length);
+            closeSlashDropdown();
+            updateCharCount();
+            dom.input.focus();
+            return;
+        }
+
+        // 3. 普通可执行命令：按 commandTypeByName 发送对应 MsgType
+        const msgType = state.commandTypeByName[name];
+        if (msgType) {
+            try { sendWS(msgType, {}); }
+            catch (err) { console.error('slash 发送失败', err, name, msgType); }
+        } else {
+            // Step 10：通用 slash_command 协议兜底
+            // 适用于 category==='skill' 的 Skill 命令以及未来无专属 MsgType 的命令
+            // (Hook / SubAgent 等)。后端按 name 在 slash.Registry 中查找并 Execute。
+            try {
+                const sent = sendWS(MsgType.SlashCommand, { name: name, arg: '' });
+                if (sent && entry.category === 'skill') {
+                    beginLocalUserTurn(formatSlashCommandDisplay(name, ''));
+                }
+            } catch (err) { console.error('slash_command send failed', err, name); }
+        }
+        dom.input.value = '';
+        closeSlashDropdown();
+        updateCharCount();
+    }
+
+    // refreshSlashDropdown 在输入变化时重建下拉，沿用 getMatchingCommands 的过滤结果。
+    // 思路：销毁旧 DOM 后调用 openSlashDropdown 重新构造一份匹配当前输入的候选。
+    function refreshSlashDropdown() {
+        if (!state.slashOpen) return;
+        const matches = getMatchingCommands();
+        if (!matches.length) { closeSlashDropdown(); return; }
+        const old = document.getElementById('slash-dropdown');
+        if (old) old.remove();
+        state.slashOpen = false;
+        openSlashDropdown();
+    }
+
+    // ---- 键盘事件 ----
+    function bindInputKeys() {
+        dom.input.addEventListener('input', () => {
+            updateCharCount();
+            const v = dom.input.value;
+            // / 命令触发条件：以 / 开头、且不含空格（避免 /foo bar 时仍展开）
+            if (v.startsWith('/') && !v.includes(' ')) {
+                if (!state.slashOpen) openSlashDropdown();
+                else refreshSlashDropdown();
+            } else if (state.slashOpen) {
+                closeSlashDropdown();
+            }
+        });
+
+        dom.input.addEventListener('keydown', (e) => {
+            // / 下拉的键盘交互优先
+            if (state.slashOpen) {
+                if (e.key === 'ArrowDown') { e.preventDefault(); updateSlashSelection(+1); return; }
+                if (e.key === 'ArrowUp')   { e.preventDefault(); updateSlashSelection(-1); return; }
+                if (e.key === 'Enter' || e.key === 'Tab') {
+                    e.preventDefault();
+                    const sel = state.slashItems[state.slashIndex];
+                    if (sel) {
+                        // Step 9.1：从 state.commands 中按 name 查找（替代 SLASH_COMMANDS）
+                        const entry = state.commands.find(c => c.name === sel.dataset.cmd);
+                        applySlashCompletion(entry);
+                    }
+                    return;
+                }
+                if (e.key === 'Escape') { e.preventDefault(); closeSlashDropdown(); return; }
+            }
+            // 发送 / 换行
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                onSendClicked();
+                return;
+            }
+            // Esc 在流式时中断
+            if (e.key === 'Escape' && state.streaming) {
+                e.preventDefault();
+                sendWS(MsgType.AbortStream, {});
+            }
+        });
+    }
+
+    // =========================================================================
+    // 杂项：全局键盘、新建会话按钮、加载占位
+    // =========================================================================
+
+    function bindGlobalKeys() {
+        document.addEventListener('keydown', (e) => {
+            // 全局 Esc 关闭下拉
+            if (e.key === 'Escape' && state.slashOpen) closeSlashDropdown();
+        });
+    }
+
+    function bindNewSessionBtn() {
+        dom.newSessionBtn.addEventListener('click', () => {
+            sendWS(MsgType.NewSession, {});
+        });
+    }
+
+    // bindDevPanel 绑定开发者面板按钮事件。
+    //
+    // 触发方式：
+    //   1. SP 状态栏双击（dblclick）→ 切换 dev 面板
+    //   2. dev 面板内「Export SP」→ 发送 dev_export_sp 请求
+    //   3. dev 面板关闭按钮 → 隐藏面板
+    //   4. SP 模态框 backdrop / 关闭按钮 → 关闭模态
+    function bindDevPanel() {
+        // 双击 SP 区域打开/关闭开发者面板
+        if (dom.spTokens && dom.spTokens.parentElement) {
+            dom.spTokens.parentElement.addEventListener('dblclick', () => {
+                toggleDevPanel();
+            });
+        }
+        if (dom.devPanelClose) {
+            dom.devPanelClose.addEventListener('click', () => toggleDevPanel(false));
+        }
+        if (dom.devExportBtn) {
+            dom.devExportBtn.addEventListener('click', () => {
+                // 触发服务端导出；响应通过 onDevExportSP 接收
+                sendWS(MsgType.DevExportSP, {});
+            });
+        }
+        if (dom.spModal) {
+            dom.spModal.querySelectorAll('[data-sp-modal-close]').forEach(el => {
+                el.addEventListener('click', closeSPModal);
+            });
+        }
+    }
+
+    function showLoading(text) {
+        const t = dom.loading.querySelector('.loading-text');
+        if (t && text) t.textContent = text;
+        dom.loading.classList.remove('is-hidden');
+    }
+
+    function hideLoading() {
+        dom.loading.classList.add('is-hidden');
+        // 动画结束后从 DOM 移除
+        setTimeout(() => { if (dom.loading.classList.contains('is-hidden')) dom.loading.style.display = 'none'; }, 400);
+    }
+
+    // =========================================================================
+    // 启动
+    // =========================================================================
+
+    function init() {
+        // 防止输入框禁用态导致无法聚焦
+        dom.input.disabled = false;
+        bindInputKeys();
+        bindGlobalKeys();
+        bindNewSessionBtn();
+        bindScrollWatcher();
+        bindDevPanel();
+        bindProjectFilePanel();
+        bindUserMenu();
+        bindCompactBtn();
+        renderCompactStat();
+        loadCurrentUser();
+        // 初始状态
+        renderSendButton();
+        renderEmptyState();
+        renderCtxBar();
+        // 默认状态 idle
+        setAgentStatus('idle');
+        // 占位显示
+        showLoading('CONNECTING TO METAATOMS');
+        // 建立 WS
+        connectWS();
+        // 失去焦点不影响输入流
+        window.addEventListener('beforeunload', () => {
+            if (state.ws) try { state.ws.close(); } catch {}
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+    // =========================================================================
+
+    // -------------------------------------------------------------------------
+    //
+    // 后端 mcp_status payload 结构:
+    //   { servers: [{ name, state, tools, reason? }], healthy_count, unhealthy_count, total_tools }
+    //
+    // 渲染策略：
+    //   1. status 文本：healthy N / unhealthy M / tools K
+    //      - 全空（未启用 MCP）：显示 "off"
+    //      - 全部 healthy：显示 "N ●"（绿色数字 + 圆点）
+    //      - 有 unhealthy：显示 "N/M ●●"（红黄圆点）
+    //   2. 圆点列：每个 server 一个圆点，按 server 状态着色
+    //   3. tooltip：hover 时显示 server 名 + 工具数 + 失败原因
+
+    // onMCPStatus 处理 mcp_status 推送。
+    function onMCPStatus(p) {
+        if (!p) return;
+        const servers = Array.isArray(p.servers) ? p.servers : [];
+        const healthyCount = (typeof p.healthy_count === 'number') ? p.healthy_count : 0;
+        const unhealthyCount = (typeof p.unhealthy_count === 'number') ? p.unhealthy_count : 0;
+        const totalTools = (typeof p.total_tools === 'number') ? p.total_tools : 0;
+        const loading = p.loading === true; // MCP 后台初始化中（握手/工具拉取未完成）
+
+        if (!dom.mcpSummary || !dom.mcpDots || !dom.mcpTooltip) return;
+
+        // MCP 后台初始化中：servers 通常为空，偶有个别 server 已就绪。
+        // 统一展示"连接中…"脉冲态，避免被下面的 off 分支误判为未启用 MCP。
+        // 后台就绪后会再次推送 loading=false 覆盖本态。
+        if (loading) {
+            dom.mcpSummary.textContent = '连接中…';
+            dom.mcpDots.innerHTML = '';
+            // 渲染一个琥珀色脉冲圆点表达"连接中"，复用现有 .mcp-dot-reconnecting 样式
+            const dot = document.createElement('span');
+            dot.className = 'mcp-dot mcp-dot-reconnecting';
+            dom.mcpDots.appendChild(dot);
+            dom.mcpTooltip.innerHTML = '';
+            const heading = document.createElement('div');
+            heading.className = 'mcp-tooltip-heading';
+            heading.textContent = 'MCP 正在后台连接…';
+            dom.mcpTooltip.appendChild(heading);
+            if (dom.mcpStat) dom.mcpStat.title = 'MCP 正在后台连接 server';
+            return;
+        }
+
+        // 未启用 MCP:servers 为空数组
+        if (servers.length === 0) {
+            dom.mcpSummary.textContent = 'off';
+            dom.mcpDots.innerHTML = '';
+            dom.mcpTooltip.innerHTML = '';
+            if (dom.mcpStat) dom.mcpStat.title = 'MCP 未启用（在 setting.json 中配置 mcp.servers）';
+            return;
+        }
+
+        // 主文案
+        const unhealthySuffix = unhealthyCount > 0 ? (' / ' + unhealthyCount + '❌') : '';
+        dom.mcpSummary.textContent = healthyCount + unhealthySuffix + ' • ' + totalTools + ' 工具';
+
+        // 圆点列
+        dom.mcpDots.innerHTML = '';
+        for (const s of servers) {
+            const dot = document.createElement('span');
+            dot.className = 'mcp-dot mcp-dot-' + (s.state || 'unknown');
+            dot.dataset.server = s.name || '';
+            dot.title = (s.name || '') + ': ' + (s.state || 'unknown') +
+                (typeof s.tools === 'number' ? ' (' + s.tools + ' 工具)' : '') +
+                (s.reason ? ' — ' + s.reason : '');
+            dom.mcpDots.appendChild(dot);
+        }
+
+        // tooltip 列表
+        dom.mcpTooltip.innerHTML = '';
+        const heading = document.createElement('div');
+        heading.className = 'mcp-tooltip-heading';
+        heading.textContent = 'MCP servers (' + healthyCount + ' healthy)';
+        dom.mcpTooltip.appendChild(heading);
+        for (const s of servers) {
+            const row = document.createElement('div');
+            row.className = 'mcp-tooltip-row';
+            const dot = document.createElement('span');
+            dot.className = 'mcp-dot mcp-dot-' + (s.state || 'unknown');
+            row.appendChild(dot);
+            const nameEl = document.createElement('span');
+            nameEl.className = 'mcp-tooltip-name';
+            nameEl.textContent = s.name || '(unnamed)';
+            row.appendChild(nameEl);
+            const meta = document.createElement('span');
+            meta.className = 'mcp-tooltip-meta';
+            meta.textContent = (s.state || 'unknown') +
+                (typeof s.tools === 'number' ? ' • ' + s.tools + ' 工具' : '');
+            row.appendChild(meta);
+            if (s.reason) {
+                const reason = document.createElement('div');
+                reason.className = 'mcp-tooltip-reason';
+                reason.textContent = s.reason;
+                row.appendChild(reason);
+            }
+            dom.mcpTooltip.appendChild(row);
+        }
+
+        // tooltip 显示控制：hover/leave 切换
+        if (dom.mcpStat) {
+            dom.mcpStat.onmouseenter = () => { dom.mcpTooltip.hidden = false; };
+            dom.mcpStat.onmouseleave = () => { dom.mcpTooltip.hidden = true; };
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Step 7：上下文压缩事件 + 状态栏压缩按钮
+    // -------------------------------------------------------------------------
+    //
+    // 后端 compaction_event payload 结构（与 protocol.go CompactionEventPayload 对齐）：
+    //   { level, light_changed, summary_changed, replaced_blocks,
+    //     before_tokens, after_tokens, tripped, manual, err }
+    //
+    // 提示强度按 Level 分级（spec 要求「summary 强提示 / light 轻量感知」）：
+    //   - summary：顶部 toast 强提示（重量级，用户须感知历史被摘要化）；
+    //   - light：仅更新状态栏压缩计数小标记，不弹 toast（每轮都可能跑，避免打扰）；
+    //   - none：仅 manual 时弹 toast 反馈「无需压缩」。
+
+    // onCompactionEvent 处理后端推送的 compaction_event。
+    function onCompactionEvent(p) {
+        if (!p) return;
+        const level = p.level || 'none';
+        const manual = p.manual === true;
+
+        // 第一层 light：累计替换数到状态栏小标记（轻量感知，不打扰）
+        if (level === 'light' && (p.replaced_blocks || 0) > 0) {
+            state.compactLightCount = (state.compactLightCount || 0) + p.replaced_blocks;
+            renderCompactStat();
+        }
+
+        // 第二层 summary：强提示 toast（重量级压缩，用户须明确感知）
+        if (level === 'summary') {
+            const before = p.before_tokens || 0;
+            const after = p.after_tokens || 0;
+            const saved = Math.max(0, before - after);
+            const msg = manual
+                ? `已手动压缩：历史摘要化（${formatTokenCount(before)} → ${formatTokenCount(after)}，释放 ${formatTokenCount(saved)})`
+                : `上下文接近上限，已自动将历史压缩为摘要（释放 ${formatTokenCount(saved)} token）`;
+            showCompactionToast(msg, manual ? 'summary-manual' : 'summary');
+            // 摘要化后历史已重组，旧轻量计数不再有意义，重置
+            state.compactLightCount = 0;
+            renderCompactStat();
+        }
+
+        // 手动触发但未实际压缩（Level=none）：反馈「无需压缩」
+        if (manual && level === 'none' && !p.err) {
+            showCompactionToast('当前上下文无需压缩', 'info');
+        }
+
+        // 熔断警告（自动第二层被禁用，用户可手动重试）
+        if (p.tripped) {
+            showCompactionToast('压缩已熔断：摘要连续失败，自动压缩暂停（可再次手动重试）', 'warn');
+        }
+        // 错误反馈
+        if (p.err) {
+            showCompactionToast('压缩失败：' + p.err, 'error');
+        }
+    }
+
+    // renderCompactStat 渲染状态栏压缩计数小标记（第一层轻量感知）。
+    function renderCompactStat() {
+        if (!dom.compactValue) return;
+        const n = state.compactLightCount || 0;
+        dom.compactValue.textContent = n > 0 ? ('⚡' + n) : '–';
+    }
+
+    // =========================================================================
+    // Step 9.1：slash 命令清单接收 + 自动映射 MsgType
+    // =========================================================================
+    //
+    // 设计要点：
+    //   1. 后端 onWSOpen 主动推送 slash_commands；前端 onWSOpen 不再主动拉取
+    //      （保留 list_slash_commands 兜底，前端可手动拉）。
+    //   2. 收到 slash_commands / slash_commands_updated 时：
+    //      - 覆盖 state.commands（按后端注册顺序）
+    //      - 重建 state.commandTypeByName：内置 4 条已知映射 + 其他命令按 name 字符串查找
+    //   3. /resume（needs_arg=true）不进入 map，由 applySlashCompletion 走补全分支
+    //   4. /sessions（category=client）不进入 map，由 applySlashCompletion 走本地分支
+    //   5. state.commands 变化时若下拉打开则重渲染
+
+    // 内置命令 name -> MsgType 映射表（与后端 handler.go slashCmdMap 对齐）。
+    // 仅含 needs_arg=false 的可执行命令；/resume / /sessions 在分支中特殊处理。
+    const BUILTIN_COMMAND_MSG_TYPE = {
+        '/new':     'new_session',
+        '/clear':   'clear_session',
+        '/compact': 'compact',
+    };
+
+    // 应用一条命令元数据到 state：填充 commands 数组并按映射规则更新 commandTypeByName。
+    //
+    // 入参 cmd 形态：{ name, description, needs_arg, arg_hint, category }
+    //   - needs_arg=true → 不进 commandTypeByName（applySlashCompletion 走补全分支）
+    //   - category='client' → 不进 commandTypeByName（applySlashCompletion 走本地分支）
+    //   - 其他情况：按 name 查 BUILTIN_COMMAND_MSG_TYPE，命中则填，未命中跳过
+    function applySlashCommandEntry(cmd) {
+        if (!cmd || !cmd.name) return;
+        // 内置映射：仅 needs_arg=false 且 category!='client' 的命令进 map
+        if (!cmd.needs_arg && cmd.category !== 'client') {
+            const mt = BUILTIN_COMMAND_MSG_TYPE[cmd.name];
+            if (mt) {
+                state.commandTypeByName[cmd.name] = mt;
+            }
+        }
+    }
+
+    // onSlashCommands 处理后端首次推送（ws open 时）或 list_slash_commands 响应。
+    // 整体覆盖本地命令清单。
+    function onSlashCommands(p) {
+        if (!p) return;
+        const list = Array.isArray(p.commands) ? p.commands : [];
+        state.commands = list.map(normalizeSlashCommandInfo);
+        state.commandTypeByName = {};
+        for (const cmd of state.commands) {
+            applySlashCommandEntry(cmd);
+        }
+        // 下拉打开中则重渲染
+        if (state.slashOpen) {
+            refreshSlashDropdown();
+        }
+    }
+
+    // onSlashCommandsUpdated 处理命令清单变化推送（Step 10 动态注册用）。
+    // 行为与 onSlashCommands 一致：整体覆盖。
+    function onSlashCommandsUpdated(p) {
+        if (!p) return;
+        const list = Array.isArray(p.commands) ? p.commands : [];
+        state.commands = list.map(normalizeSlashCommandInfo);
+        state.commandTypeByName = {};
+        for (const cmd of state.commands) {
+            applySlashCommandEntry(cmd);
+        }
+        if (state.slashOpen) {
+            refreshSlashDropdown();
+        }
+    }
+
+    // normalizeSlashCommandInfo 把后端 SlashCommandInfo 规整为前端内部形态。
+    // 后端字段：name / description / needs_arg / arg_hint / category
+    // 前端字段：cmd / desc / needsArg / argHint / category
+    function normalizeSlashCommandInfo(raw) {
+        return {
+            name:        raw.name || '',
+            description: raw.description || '',
+            needsArg:    raw.needs_arg === true,
+            argHint:     raw.arg_hint || '',
+            category:    raw.category || '',
+        };
+    }
+
+    // showCompactionToast 显示一个顶部 toast，type 决定配色与停留时长。
+    // 自动消失；点击或超时后移除。
+    function showCompactionToast(text, type) {
+        if (!dom.toastContainer) return;
+        const toast = document.createElement('div');
+        toast.className = 'toast toast-' + (type || 'info');
+        toast.setAttribute('role', 'status');
+        toast.textContent = text;
+        toast.addEventListener('click', () => dismissToast(toast));
+        dom.toastContainer.appendChild(toast);
+        // 入场动画：下一帧加 is-visible 触发过渡
+        requestAnimationFrame(() => toast.classList.add('is-visible'));
+        const dwell = (type === 'summary-manual') ? 6500
+            : (type === 'summary' ? 5000
+                : (type === 'error' || type === 'warn' ? 5000 : 3500));
+        setTimeout(() => dismissToast(toast), dwell);
+    }
+
+    function dismissToast(toast) {
+        if (!toast || !toast.parentNode) return;
+        toast.classList.remove('is-visible');
+        toast.classList.add('is-leaving');
+        setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 250);
+    }
+
+    // bindCompactBtn 绑定状态栏压缩按钮点击 → 发送 compact 请求（手动压缩）。
+    function bindCompactBtn() {
+        if (dom.compactBtn) {
+            dom.compactBtn.addEventListener('click', () => {
+                sendWS(MsgType.Compact, {});
+            });
+        }
+    }
+
+    // -------------------------------------------------------------------------
+
+    // =========================================================================
+
+    // 主题键名与可选取值集中常量，避免散落字符串字面量
+    const THEME_STORAGE_KEY = 'metaatoms-theme';
+    const THEME_LIGHT = 'light';
+    const THEME_DARK  = 'dark';
+
+    // 从 <html data-theme> 读取当前主题。
+    // 未设置时（首访 / localStorage 不可用）回退到亮色——与产品默认主题一致。
+    // [Why] 不再回读 localStorage：FOUC 内联脚本已把持久值同步到 <html> 属性，
+    // 直接读属性比读 storage 少一次 IO，也避免了 storage 与属性短暂不一致的边缘态。
+    function getCurrentTheme() {
+        const t = document.documentElement.getAttribute('data-theme');
+        return t === THEME_DARK ? THEME_DARK : THEME_LIGHT;
+    }
+
+    // 应用主题：只写 <html data-theme>，不写 localStorage。
+    // [Why] <html> 是 :root 所在节点，CSS 变量在这里定义，写这里使所有后代元素
+    // （含 app.js 尚未初始化的 DOM）能立即感知主题变更。
+    function applyTheme(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+    }
+
+    // 持久化：仅在用户主动点击切换时调用，首访不写。
+    // 避免「首次打开页面就修改 storage」的隐私打扰。
+    function persistTheme(theme) {
+        try { localStorage.setItem(THEME_STORAGE_KEY, theme); } catch (_) { /* 隐私模式等静默 */ }
+    }
+
+    // 同步按钮的 title / aria-label：反映当前主题 + 提示点击后去向。
+    // 工具提示动态更新比静态文案更友好，能让用户随时知道「再点一次会变什么」。
+    function updateThemeToggleTitle() {
+        if (!dom.themeToggle) return;
+        const current = getCurrentTheme();
+        const isLight = current === THEME_LIGHT;
+        const cur = isLight ? '亮色' : '暗色';
+        const toOther = isLight ? '暗色' : '亮色';
+        const label = `切换主题（当前：${cur}，点击切到${toOther}）`;
+        dom.themeToggle.title = label;
+        dom.themeToggle.setAttribute('aria-label', label);
+    }
+
+    // 绑定主题切换按钮：仅注册一次，在 IIFE 启动时执行。
+    function bindThemeToggle() {
+        if (!dom.themeToggle) return;
+        // 启动时同步按钮提示，标题反映当前真实主题
+        updateThemeToggleTitle();
+        dom.themeToggle.addEventListener('click', () => {
+            const next = getCurrentTheme() === THEME_LIGHT ? THEME_DARK : THEME_LIGHT;
+            applyTheme(next);
+            persistTheme(next);
+            updateThemeToggleTitle();
+        });
+    }
+
+    // 在 IIFE 末尾的主入口调用
+    bindThemeToggle();
+})();

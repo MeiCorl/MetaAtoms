@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MetaAtoms</title>
+
+    <!-- 避免浏览器请求 /favicon.ico 触发 404 -->
+    <link rel="icon" href="/metaatoms-icon.png?v=20260731-metaatoms-icon" type="image/png">
+
+    <!-- Google Fonts: JetBrains Mono (display/code) + Geist (body) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <link rel="stylesheet" href="/style.css?v=20260731-atom-icon">
+    <link rel="stylesheet" href="/vendor/highlight-theme.css?v=20260731-atom-icon">
+
+    <!-- 主题同步：默认亮色；HTML 解析期立即从 localStorage 读取并写到 <html data-theme="...">，
+         避免在 CSS 应用前出现「先亮再暗」或「先暗再亮」的闪烁（FOUC）。
+         不依赖 app.js（app.js 是 defer 加载）。 -->
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('metaatoms-theme');
+                if (t === 'light' || t === 'dark') {
+                    document.documentElement.setAttribute('data-theme', t);
+                }
+            } catch (e) { /* localStorage 不可用时静默使用默认亮色 */ }
+        })();
+    </script>
+</head>
+<body>
+    <!-- 加载占位：未连上 WebSocket 时显示，Task 6 JS 接入后会隐藏 -->
+    <div id="loading" class="loading-overlay" role="status" aria-live="polite">
+        <div class="loading-inner">
+            <div class="loading-spinner" aria-hidden="true"></div>
+            <div class="loading-text">CONNECTING TO METAATOMS</div>
+        </div>
+    </div>
+
+    <div id="app">
+
+        <!-- 顶部信息栏 -->
+        <header class="topbar" role="banner">
+            <div class="topbar-brand">
+                <img class="topbar-logo" src="/metaatoms-icon.png?v=20260731-metaatoms-icon" alt="" aria-hidden="true">
+                <span>MetaAtoms</span>
+                <span class="topbar-version" id="version-badge" title="当前版本">v1.2.2</span>
+            </div>
+
+            <span class="topbar-divider" aria-hidden="true"></span>
+
+            <div class="topbar-meta">
+                <span class="topbar-meta-label">开源地址:</span>
+                <a href="https://github.com/metaatoms/metaatoms" target="_blank" rel="noopener">github.com/metaatoms/metaatoms</a>
+            </div>
+
+            <div class="topbar-spacer"></div>
+
+            <div class="topbar-status" aria-live="polite">
+                <span id="agent-status-text">就绪</span>
+                <span id="agent-status-dot" class="status-dot" data-status="idle" aria-hidden="true"></span>
+            </div>
+
+            <!-- 亮色 / 暗色 主题切换按钮：紧贴就绪状态右侧。
+                 图标遵循「展示目标态」约定——默认亮色态下显示 🌙（点击切到暗色），
+                 暗色态下显示 ☀️（点击切到亮色）。 -->
+            <div id="user-menu" class="topbar-user" data-loaded="false">
+                <button id="user-menu-button" class="user-menu-button" type="button"
+                        aria-haspopup="dialog" aria-expanded="false" title="当前登录用户">
+                    <span id="user-avatar" class="user-avatar" aria-hidden="true">--</span>
+                    <span id="user-nickname" class="user-nickname">--</span>
+                    <span class="user-chevron" aria-hidden="true">▾</span>
+                </button>
+                <div id="user-menu-panel" class="user-menu-panel" hidden role="dialog" aria-label="当前登录用户信息">
+                    <div class="user-menu-heading">
+                        <span id="user-menu-avatar" class="user-avatar user-avatar-lg" aria-hidden="true">--</span>
+                        <span id="user-menu-name" class="user-menu-name">--</span>
+                    </div>
+                    <dl class="user-menu-fields">
+                        <div>
+                            <dt>Email</dt>
+                            <dd id="user-menu-email">--</dd>
+                        </div>
+                        <div>
+                            <dt>UID</dt>
+                            <dd id="user-menu-uid">--</dd>
+                        </div>
+                    </dl>
+                    <div class="user-menu-actions">
+                        <button id="user-logout-btn" class="user-logout-btn" type="button">Logout</button>
+                    </div>
+                </div>
+            </div>
+
+            <button id="theme-toggle" class="theme-toggle" type="button"
+                    title="切换主题（亮色 / 暗色）" aria-label="切换主题">
+                <svg class="theme-icon icon-sun" xmlns="http://www.w3.org/2000/svg" width="14" height="14"
+                     viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="4"/>
+                    <path d="M12 2v2"/>
+                    <path d="M12 20v2"/>
+                    <path d="m4.93 4.93 1.41 1.41"/>
+                    <path d="m17.66 17.66 1.41 1.41"/>
+                    <path d="M2 12h2"/>
+                    <path d="M20 12h2"/>
+                    <path d="m6.34 17.66-1.41 1.41"/>
+                    <path d="m19.07 4.93-1.41 1.41"/>
+                </svg>
+                <svg class="theme-icon icon-moon" xmlns="http://www.w3.org/2000/svg" width="14" height="14"
+                     viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+                </svg>
+            </button>
+        </header>
+
+        <!-- 左侧会话历史 -->
+        <aside class="sidebar" role="complementary" aria-label="会话历史">
+            <div class="sidebar-header">
+                <span class="sidebar-title">Sessions</span>
+                <button id="new-session-btn" class="sidebar-new" type="button" title="新建会话">+ NEW</button>
+            </div>
+            <div id="session-list" class="sidebar-list" role="list">
+                <div class="sidebar-empty">
+                    尚无历史会话<br>
+                    <span style="color: var(--fg-faint)">新建一次对话后会自动出现在这里</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- 中部主区 -->
+        <main class="main" role="main">
+            <div class="main-header">
+                <span class="main-header-title" id="current-session-title">CURRENT SESSION</span>
+                <span class="main-header-meta" id="current-session-meta">--</span>
+            </div>
+
+            <div id="messages" class="messages" role="log" aria-live="polite" aria-label="对话消息流">
+                <div class="messages-empty">
+                    <img class="messages-empty-logo" src="/metaatoms-icon.png?v=20260731-metaatoms-icon" alt="" aria-hidden="true">
+                    <span class="messages-empty-title">描述你的想法，交给 MetaAtoms 规划与实现</span>
+                    <span class="messages-empty-hint">
+                        说清目标、用户、核心功能或交付标准后按 <kbd>Enter</kbd> 发送<br>
+                        <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行<br>
+                        输入 <kbd>/</kbd> 唤出快捷命令（/new · /sessions · /resume · /clear · /skills）
+                    </span>
+                </div>
+            </div>
+
+            <div class="inputbar" role="form" aria-label="消息输入">
+                <!-- 顶行：输入框 + 发送按钮。发送按钮保持在输入框右侧，位置不变。 -->
+                <div class="inputbar-main">
+                    <div class="inputbar-wrap">
+                        <textarea
+                            id="input"
+                            rows="3"
+                            placeholder="描述你想构建的产品、应用或自动化需求，或输入 / 唤出命令…"
+                            aria-label="消息输入框"
+                        ></textarea>
+                        <div class="inputbar-hint">
+                            <span>
+                                <kbd>Enter</kbd> 发送 ·
+                                <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行 ·
+                                <kbd>/</kbd> 命令
+                            </span>
+                            <span id="char-count">0</span>
+                        </div>
+                    </div>
+                    <div class="inputbar-send-side">
+                        <button id="send-btn" class="send-btn" type="button" title="发送 (Enter)">
+                            <span>Send</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 底部状态栏：model / system prompt / ctx left / compact / mcp
+                     六个状态指标从原输入框右侧的窄竖列迁出，改为独立一行水平排列，
+                     消除原先 6 项挤在 260px 窄列（且 mcp 溢出到隐式行）的拥挤问题。 -->
+                <div class="inputbar-statusbar">
+                    <div class="inputbar-stat" data-status="idle">
+                        <span class="inputbar-stat-label">model</span>
+                        <span class="inputbar-stat-value" id="model-name">--</span>
+                    </div>
+                    <div class="inputbar-stat" id="sp-stat" title="System Prompt token 估算（悬停查看各 Source 小计）">
+                        <span class="inputbar-stat-label">system prompt</span>
+                        <span class="inputbar-stat-value" id="sp-tokens">--</span>
+                        <div class="sp-breakdown" id="sp-breakdown" hidden></div>
+                    </div>
+                    <div class="inputbar-stat">
+                        <span class="inputbar-stat-label">ctx left</span>
+                        <span class="inputbar-stat-value" id="ctx-percent">100%</span>
+                    </div>
+                    <!-- Step 7: 压缩按钮 - 手动触发上下文压缩（历史摘要化），并显示累计轻量压缩计数 -->
+                    <button id="compact-btn" class="inputbar-stat compact-stat" type="button"
+                            title="压缩上下文：手动触发历史摘要化，腾出上下文空间"
+                            aria-label="压缩上下文">
+                        <span class="inputbar-stat-label">compact</span>
+                        <span class="inputbar-stat-value" id="compact-stat-value">–</span>
+                    </button>
+                    <!-- Step 8: MCP 状态区 - 显示已连接 server 数量 + 圆点;hover 列表 -->
+                    <div class="inputbar-stat" id="mcp-stat" title="MCP server 健康状态（悬停查看详情）">
+                        <span class="inputbar-stat-label">mcp</span>
+                        <span class="inputbar-stat-value" id="mcp-summary">--</span>
+                        <span class="mcp-dots" id="mcp-dots" aria-hidden="true"></span>
+                        <div class="mcp-tooltip" id="mcp-tooltip" hidden role="tooltip" aria-label="MCP server 列表"></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- 右侧用户文件侧栏：文件 / Git / 搜索多标签，Task 5 接入交互逻辑 -->
+        <aside id="project-file-panel" class="project-file-panel" role="complementary" aria-label="用户文件侧栏">
+            <div class="project-panel-tabs" role="tablist" aria-label="用户文件侧栏视图">
+                <button id="project-tab-files-btn" class="project-panel-tab is-active" data-project-tab="files" type="button" role="tab" aria-selected="true" aria-controls="project-tab-files">文件</button>
+                <button id="project-tab-git-btn" class="project-panel-tab" data-project-tab="git" type="button" role="tab" aria-selected="false" aria-controls="project-tab-git">Git</button>
+                <button id="project-tab-search-btn" class="project-panel-tab" data-project-tab="search" type="button" role="tab" aria-selected="false" aria-controls="project-tab-search">搜索</button>
+            </div>
+
+            <section id="project-tab-files" class="project-panel-tabpanel is-active" data-project-tab-panel="files" role="tabpanel" aria-labelledby="project-tab-files-btn">
+                <div class="project-panel-header">
+                    <div class="project-panel-heading">
+                        <span class="project-panel-title">User Files</span>
+                        <span id="project-panel-count" class="project-panel-count" aria-live="polite">--</span>
+                    </div>
+                    <button id="project-refresh-btn" class="project-panel-refresh" type="button" title="刷新当前目录" aria-label="刷新当前目录">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74"/>
+                            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74"/>
+                            <path d="M8 18H5v3"/>
+                            <path d="M16 6h3V3"/>
+                        </svg>
+                    </button>
+                </div>
+
+                <div class="project-pathbar">
+                    <div id="project-current-path" class="project-current-path" title="用户目录">.</div>
+                    <nav id="project-breadcrumbs" class="project-breadcrumbs" aria-label="用户目录面包屑">
+                        <button class="project-crumb is-active" type="button" title="用户目录">root</button>
+                    </nav>
+                </div>
+
+                <div id="project-panel-truncated" class="project-panel-banner project-panel-truncated" hidden role="status">
+                    当前目录条目较多，已显示前一部分结果。
+                </div>
+                <div id="project-panel-loading" class="project-panel-state project-panel-loading" role="status" aria-live="polite">
+                    <span class="project-panel-spinner" aria-hidden="true"></span>
+                    <span>等待加载用户文件...</span>
+                </div>
+                <div id="project-panel-empty" class="project-panel-state project-panel-empty" hidden>
+                    <span class="project-panel-state-title">目录为空</span>
+                    <span class="project-panel-state-note">当前路径下没有可显示的条目。</span>
+                </div>
+                <div id="project-panel-error" class="project-panel-state project-panel-error" hidden role="alert">
+                    <span class="project-panel-state-title">无法加载目录</span>
+                    <span id="project-panel-error-text" class="project-panel-state-note">请稍后重试。</span>
+                </div>
+
+                <div id="project-file-list" class="project-file-list" role="list" aria-live="polite" aria-label="用户文件列表"></div>
+            </section>
+
+            <section id="project-tab-git" class="project-panel-tabpanel" data-project-tab-panel="git" role="tabpanel" aria-labelledby="project-tab-git-btn" hidden>
+                <div class="project-panel-header project-git-header">
+                    <div class="project-panel-heading">
+                        <span class="project-panel-title">Git Changes</span>
+                        <span id="project-git-count" class="project-panel-count" aria-live="polite">--</span>
+                    </div>
+                    <button id="project-git-refresh-btn" class="project-panel-refresh" data-project-git-refresh type="button" title="刷新 Git 变更" aria-label="刷新 Git 变更">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74"/>
+                            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74"/>
+                            <path d="M8 18H5v3"/>
+                            <path d="M16 6h3V3"/>
+                        </svg>
+                    </button>
+                </div>
+                <div id="project-git-status" class="project-git-status" aria-live="polite">
+                    <span class="project-git-status-dot" data-status="idle" aria-hidden="true"></span>
+                    <span id="project-git-status-text">等待刷新 Git 变更。</span>
+                </div>
+                <div id="project-git-loading" class="project-panel-state project-panel-loading" hidden role="status" aria-live="polite">
+                    <span class="project-panel-spinner" aria-hidden="true"></span>
+                    <span>正在读取 Git 变更...</span>
+                </div>
+                <div id="project-git-empty" class="project-panel-state project-panel-empty" hidden>
+                    <span class="project-panel-state-title">没有本地变更</span>
+                    <span class="project-panel-state-note">当前用户目录是干净的。</span>
+                </div>
+                <div id="project-git-error" class="project-panel-state project-panel-error" hidden role="alert">
+                    <span class="project-panel-state-title">无法读取 Git 状态</span>
+                    <span id="project-git-error-text" class="project-panel-state-note">请稍后重试。</span>
+                </div>
+                <div id="project-git-list" class="project-git-list" data-project-git-list role="list" aria-live="polite" aria-label="Git 变更文件列表"></div>
+            </section>
+
+            <section id="project-tab-search" class="project-panel-tabpanel" data-project-tab-panel="search" role="tabpanel" aria-labelledby="project-tab-search-btn" hidden>
+                <form id="project-search-form" class="project-search-form" data-project-search-form role="search">
+                    <label class="project-search-field">
+                        <span class="project-search-label">关键词</span>
+                        <input id="project-search-query" class="project-search-input" data-project-search-query type="search" autocomplete="off" spellcheck="false" placeholder="输入要搜索的内容">
+                    </label>
+                    <label class="project-search-field">
+                        <span class="project-search-label">路径</span>
+                        <input id="project-search-path" class="project-search-input" data-project-search-path type="text" autocomplete="off" spellcheck="false" placeholder="相对路径，可留空">
+                    </label>
+                    <label class="project-search-toggle">
+                        <input id="project-search-regex" data-project-search-regex type="checkbox">
+                        <span>正则</span>
+                    </label>
+                    <label class="project-search-field">
+                        <span class="project-search-label">排除</span>
+                        <input id="project-search-exclude" class="project-search-input" data-project-search-exclude type="text" autocomplete="off" spellcheck="false" placeholder="node_modules, dist, *.log">
+                    </label>
+                    <button id="project-search-run-btn" class="project-search-run" data-project-search-run type="submit">搜索</button>
+                </form>
+                <div id="project-search-summary" class="project-search-summary" aria-live="polite">输入关键词后执行搜索。</div>
+                <div id="project-search-loading" class="project-panel-state project-panel-loading" hidden role="status" aria-live="polite">
+                    <span class="project-panel-spinner" aria-hidden="true"></span>
+                    <span>正在搜索用户目录内容...</span>
+                </div>
+                <div id="project-search-empty" class="project-panel-state project-panel-empty" hidden>
+                    <span class="project-panel-state-title">没有搜索结果</span>
+                    <span class="project-panel-state-note">换一个关键词、路径或排除规则再试。</span>
+                </div>
+                <div id="project-search-error" class="project-panel-state project-panel-error" hidden role="alert">
+                    <span class="project-panel-state-title">搜索失败</span>
+                    <span id="project-search-error-text" class="project-panel-state-note">请稍后重试。</span>
+                </div>
+                <div id="project-search-results" class="project-search-results" data-project-search-results role="list" aria-live="polite" aria-label="用户文件搜索结果"></div>
+            </section>
+        </aside>
+        <!-- 开发者模式 + Export SP 模态框（Step 4 可观测性） -->
+        <div id="dev-panel" class="dev-panel" hidden>
+            <div class="dev-panel-header">
+                <span class="dev-panel-title">开发者模式</span>
+                <button id="dev-panel-close" class="dev-panel-close" type="button" title="关闭">×</button>
+            </div>
+            <div class="dev-panel-body">
+                <button id="dev-export-sp-btn" class="dev-panel-btn" type="button" title="导出当前 System Prompt">
+                    Export SP
+                </button>
+            </div>
+        </div>
+
+
+        <!-- 用户文件预览弹窗：默认隐藏，后续由 app.js 写入元数据和内容 -->
+        <div id="project-file-modal" class="project-file-modal" hidden role="dialog" aria-modal="true" aria-labelledby="project-file-modal-title">
+            <div class="project-file-modal-backdrop" data-project-file-modal-close></div>
+            <div class="project-file-modal-inner">
+                <div class="project-file-modal-header">
+                    <div class="project-file-modal-title-wrap">
+                        <span id="project-file-modal-title" class="project-file-modal-title">文件预览</span>
+                        <span id="project-file-modal-path" class="project-file-modal-path" title="--">--</span>
+                    </div>
+                    <button id="project-file-modal-close" class="project-file-modal-close" data-project-file-modal-close type="button" title="关闭 (Esc)" aria-label="关闭文件预览">×</button>
+                </div>
+                <div id="project-file-modal-meta" class="project-file-modal-meta" aria-live="polite">
+                    <span id="project-file-modal-size">--</span>
+                    <span id="project-file-modal-type">--</span>
+                    <span id="project-file-modal-language">--</span>
+                </div>
+                <div id="project-file-modal-body" class="project-file-modal-body" tabindex="0">
+                    <div class="project-file-preview-placeholder">选择文件后在这里预览内容。</div>
+                </div>
+            </div>
+        </div>
+        <!-- SP 导出结果模态框 -->
+        <div id="sp-modal" class="sp-modal" hidden>
+            <div class="sp-modal-backdrop" data-sp-modal-close></div>
+            <div class="sp-modal-inner">
+                <div class="sp-modal-header">
+                    <span class="sp-modal-title">System Prompt 导出</span>
+                    <button class="sp-modal-close" data-sp-modal-close type="button">×</button>
+                </div>
+                <div class="sp-modal-body">
+                    <div class="sp-modal-summary" id="sp-modal-summary">--</div>
+                    <details class="sp-modal-section" open>
+                        <summary>System Blocks（系统字段）</summary>
+                        <pre class="sp-modal-text" id="sp-modal-system">--</pre>
+                    </details>
+                    <details class="sp-modal-section">
+                        <summary>Lead User Message（首条 user 消息）</summary>
+                        <pre class="sp-modal-text" id="sp-modal-lead">--</pre>
+                    </details>
+                    <details class="sp-modal-section">
+                        <summary>Source 统计</summary>
+                        <pre class="sp-modal-text" id="sp-modal-stats">--</pre>
+                    </details>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 10 Task 6：/skills 模态框（三档 Skill 列表）
+             默认 display:none，由 JS 动态打开（app.js openSkillsTable()）。 -->
+        <div id="skills-modal" class="skills-modal" hidden>
+            <div class="skills-modal-backdrop" data-skills-modal-close></div>
+            <div class="skills-modal-inner">
+                <div class="skills-modal-header">
+                    <span class="skills-modal-title">可用 Skill 列表</span>
+                    <button class="skills-modal-close" data-skills-modal-close type="button" title="关闭 (Esc)">×</button>
+                </div>
+                <div class="skills-modal-body">
+                    <div class="skills-tabs" role="tablist" aria-label="Skill 来源级别">
+                        <button class="skills-tab is-active" data-source="project" type="button" role="tab" aria-selected="true">用户级</button>
+                        <button class="skills-tab" data-source="user" type="button" role="tab" aria-selected="false">全局级</button>
+                        <button class="skills-tab" data-source="builtin" type="button" role="tab" aria-selected="false">内置级</button>
+                    </div>
+                    <div class="skills-list" id="skills-list-content" role="tabpanel" aria-live="polite">
+                        <!-- 由 app.js renderSkillsList() 动态填充 -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Step 7: 全局 toast 容器（压缩事件等强提示） -->
+    <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+    <!-- Step 1.2 接入 DOMPurify / marked / highlight.js / app.js，加载顺序固定 -->
+    <script src="/vendor/purify.min.js?v=20260731-atom-icon" defer></script>
+    <script src="/vendor/marked.min.js?v=20260731-atom-icon" defer></script>
+    <script src="/vendor/highlight.min.js?v=20260731-atom-icon" defer></script>
+    <!-- Step 1.4 接入 diff-match-patch：app.js 的 openFileDiffModal 通过全局 diff_match_patch 计算行级 diff -->
+    <script src="/vendor/diff-match-patch.min.js?v=20260731-atom-icon" defer></script>
+    <script src="/app.js?v=20260731-atom-icon" defer></script>
+</body>
+</html>

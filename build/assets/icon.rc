@@ -1,0 +1,3 @@
+﻿// MetaAtoms application icon resource
+// Regenerate: powershell -ExecutionPolicy Bypass -File build\assets\generate_icon.ps1
+1 ICON "icon.ico"

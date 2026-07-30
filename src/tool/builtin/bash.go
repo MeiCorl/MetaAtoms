@@ -1,0 +1,191 @@
+package builtin
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os/exec"
+	"runtime"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/metaatoms/metaatoms/src/tool"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
+)
+
+// BashName 是 Bash 工具的唯一标识（大驼峰格式）。
+const BashName = "Bash"
+
+const (
+	bashDefaultTimeoutSec = 30
+	bashMaxOutputBytes    = 1024 * 1024 // 1MB，单边 stdout/stderr 上限
+)
+
+// bashInput 是 Bash 工具的入参结构。
+type bashInput struct {
+	Command string `json:"command" jsonschema:"required,description=要执行的 shell 命令字符串"`
+	Timeout int    `json:"timeout" jsonschema:"description=单次执行超时秒数（覆盖全局默认 30s），0 表示使用默认"`
+}
+
+var _ = bashInput{} // 见 schema.go
+
+// BashTool 是 Bash 工具的实现。
+type BashTool struct {
+	tool.BaseTool
+	// DefaultTimeout 是未指定 timeout 时的默认超时。
+	DefaultTimeout time.Duration
+	WorkingDir     string
+}
+
+// NewBashTool 构造 Bash 工具实例。
+func NewBashTool(defaultTimeout time.Duration) *BashTool {
+	if defaultTimeout <= 0 {
+		defaultTimeout = bashDefaultTimeoutSec * time.Second
+	}
+	return &BashTool{
+		BaseTool: tool.BaseTool{
+			ToolName:        BashName,
+			ToolDescription: "在宿主 shell 中执行一条命令，捕获 stdout/stderr/exit code。支持管道、重定向、复合命令。带超时控制（默认 30s）。危险命令（rm -rf /、mkfs、shutdown 等）会被黑名单拦截，不会执行。注意：当内置工具（ReadFile/WriteFile/EditFile/Grep/Glob）可以完成相同任务时，必须优先使用内置工具，仅在内置工具无法胜任时才使用 Bash。",
+			ToolInputSchema: bashSchema,
+			ToolPermission:  tool.PermExec,
+		},
+		DefaultTimeout: defaultTimeout,
+	}
+}
+
+// Execute 实现 tool.Tool.Execute。
+func (t *BashTool) Execute(parent context.Context, input json.RawMessage) (string, error) {
+	var in bashInput
+	if err := json.Unmarshal(input, &in); err != nil {
+		return "", fmt.Errorf("参数解析失败: %w", err)
+	}
+	if strings.TrimSpace(in.Command) == "" {
+		return "", errors.New("command 不能为空")
+	}
+
+	// 黑名单检查已提升至拦截器层（security.Checker.Decide 硬安全预检），
+	// 此处不再重复检查。
+
+	// 超时控制
+	timeout := t.DefaultTimeout
+	if in.Timeout > 0 {
+		timeout = time.Duration(in.Timeout) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	// 根据平台选择 shell：Unix 用 sh -c，Windows 用 powershell -Command
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		// 强制 PowerShell 输出 UTF-8 编码，避免中文 Windows 默认 GBK(CP936) 导致乱码
+		utf8Setup := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", utf8Setup+in.Command)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", in.Command)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &limitedWriter{w: &stdout, n: bashMaxOutputBytes}
+	cmd.Stderr = &limitedWriter{w: &stderr, n: bashMaxOutputBytes}
+	if strings.TrimSpace(t.WorkingDir) != "" {
+		cmd.Dir = t.WorkingDir
+	}
+
+	err := cmd.Run()
+	// 区分超时与其他错误
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("命令执行超时（> %s）", timeout)
+	}
+	if err != nil {
+		// 退出码非零，但命令确实跑过——把 stdout/stderr 一起返回，标记为错误
+		out := decodeOutput(stdout.Bytes())
+		errOut := decodeOutput(stderr.Bytes())
+		if errOut != "" {
+			return formatBashOutput(out, errOut, -1) + "\n" + err.Error(), nil
+		}
+		// exec.ExitError 时提取 exit code
+		if ee, ok := err.(*exec.ExitError); ok {
+			return formatBashOutput(out, errOut, ee.ExitCode()), nil
+		}
+		return "", fmt.Errorf("执行命令失败: %w", err)
+	}
+
+	return formatBashOutput(decodeOutput(stdout.Bytes()), decodeOutput(stderr.Bytes()), 0), nil
+}
+
+// formatBashOutput 把 stdout/stderr/exit code 拼成 LLM 友好的文本。
+func formatBashOutput(stdout, stderr string, exitCode int) string {
+	var b strings.Builder
+	b.WriteString("exit_code: ")
+	fmt.Fprintf(&b, "%d\n", exitCode)
+	if stdout != "" {
+		b.WriteString("--- stdout ---\n")
+		b.WriteString(stdout)
+		if !strings.HasSuffix(stdout, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	if stderr != "" {
+		b.WriteString("--- stderr ---\n")
+		b.WriteString(stderr)
+		if !strings.HasSuffix(stderr, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	if stdout == "" && stderr == "" {
+		b.WriteString("(无输出)\n")
+	}
+	return b.String()
+}
+
+// limitedWriter 写入超过 n 字节后停止继续写入并丢弃。
+// 防止单边输出把内存撑爆。
+type limitedWriter struct {
+	w       *bytes.Buffer
+	n       int
+	written int
+}
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if l.written >= l.n {
+		// 超过上限：假装写入成功但不真正落盘
+		return len(p), nil
+	}
+	remaining := l.n - l.written
+	if len(p) <= remaining {
+		l.written += len(p)
+		return l.w.Write(p)
+	}
+	l.written = l.n
+	written, err := l.w.Write(p[:remaining])
+	// 假装完整写入以避免 os/exec 误判
+	if err == nil {
+		written = len(p)
+	}
+	return written, err
+}
+
+// decodeOutput 将命令输出的原始字节流转为合法 UTF-8 字符串。
+// 优先直接按 UTF-8 解码；若检测到无效 UTF-8 序列（Windows 中文环境下常见 GBK 编码），
+// 则尝试 GBK → UTF-8 转换作为兜底。转换也失败时用替换字符替代无效字节。
+func decodeOutput(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// 已是合法 UTF-8，直接返回
+	if utf8.Valid(raw) {
+		return string(raw)
+	}
+	// 尝试 GBK → UTF-8 转换（Windows 中文环境默认编码）
+	reader := transform.NewReader(bytes.NewReader(raw), simplifiedchinese.GBK.NewDecoder())
+	decoded, err := io.ReadAll(reader)
+	if err == nil {
+		return string(decoded)
+	}
+	// 转换也失败，用替换字符替代无效字节
+	return strings.ToValidUTF8(string(raw), "�")
+}

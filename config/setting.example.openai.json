@@ -1,0 +1,40 @@
+{
+    "provider": "openai",
+    "server_port": 8969,
+    "model": "gpt-4o",
+    "base_url": "",
+    "api_key": "sk-your-api-key-here",
+    "max_tokens": 16384,
+    "timeout": 180,
+    "max_retries": 2,
+    "tools": {
+        "enabled": ["ReadFile", "WriteFile", "EditFile", "Bash", "Glob", "Grep"]
+    },
+    "tool_execution_timeout_seconds": 30,
+    "tool_working_directory": "",
+    "context_window_size": 200000,
+    "max_agent_loop_iterations": 50,
+    "context_safety_margin": 4096,
+    "mcp": {
+        "handshake_timeout_seconds": 30,
+        "list_tools_cache_ttl_seconds": 60,
+        "servers": [
+            {
+                "name": "filesystem",
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+                "env": {},
+                "timeout": 30
+            }
+        ]
+    },
+
+    "subagent": {
+        "enabled": true,
+        "max_definition_size_bytes": 65536,
+        "default_background_timeout_seconds": 300,
+        "global_denied_tools": ["agent", "task_status"],
+        "background_allowed_tools": ["ReadFile", "Glob", "Grep", "Bash"]
+    }
+}
