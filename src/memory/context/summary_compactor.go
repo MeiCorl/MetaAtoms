@@ -44,7 +44,7 @@ import (
 // 定义在 context 包（而非导入 session 包）是为了让 SummaryCompactor 依赖【抽象】：
 // session.SessionManager 天然实现这两个方法（鸭子类型自动满足接口），从而避免
 // context → session 的硬依赖，保持记忆层内 context 包与 session 包松耦合（与
-// ToolResultStore 持 projectDir 字符串而非 SessionManager 引用同一解耦思路）。
+// ToolResultStore 持 sessionsRoot 字符串而非 SessionManager 引用同一解耦思路）。
 type HistoryArchiver interface {
 	// ArchiveMessages 把被压缩掉的早期原文追加写入归档文件（append-only）。
 	ArchiveMessages(sessionID string, msgs []llm.Message) error

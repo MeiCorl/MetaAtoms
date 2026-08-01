@@ -103,7 +103,7 @@ type testRig struct {
 	h                *Handler
 	mp               *mockProvider
 	sessDir          string
-	projectDir       string
+	sessionsDir      string
 	sm               *session.SessionManager
 	srv              *httptest.Server
 	connMgr          *ConnectionManager
@@ -144,14 +144,14 @@ func newTestRig(t *testing.T, chunks []llm.StreamChunk) *testRig {
 	t.Cleanup(func() { client.Close() })
 
 	return &testRig{
-		h:          h,
-		mp:         mp,
-		sessDir:    dir,
-		projectDir: filepath.Join(dir, filepath.Base(handlerTestWorkdir)),
-		sm:         sm,
-		srv:        ts,
-		connMgr:    s.ConnectionManager(),
-		client:     client,
+		h:           h,
+		mp:          mp,
+		sessDir:     dir,
+		sessionsDir: sm.SessionsRoot(),
+		sm:          sm,
+		srv:         ts,
+		connMgr:     s.ConnectionManager(),
+		client:      client,
 	}
 }
 
@@ -258,10 +258,10 @@ func TestUserInputStreamsAndPersists(t *testing.T) {
 		t.Errorf("PercentLeft = %d，应在 0~100", ctxPayload.PercentLeft)
 	}
 
-	// 验证会话已写入项目目录下的 session 子目录（排除 .project.json 等非目录文件）
-	entries, err := os.ReadDir(r.projectDir)
+	// 验证会话已写入 sessions 根目录下的 session 子目录。
+	entries, err := os.ReadDir(r.sessionsDir)
 	if err != nil {
-		t.Fatalf("读取项目目录失败: %v", err)
+		t.Fatalf("读取 sessions 根目录失败: %v", err)
 	}
 	var sessionDir string
 	for _, e := range entries {
@@ -274,7 +274,7 @@ func TestUserInputStreamsAndPersists(t *testing.T) {
 		t.Fatal("期望至少 1 个会话子目录，实际 0")
 	}
 	// 验证 messages.jsonl 内容包含用户消息和助手消息
-	msgFile := filepath.Join(r.projectDir, sessionDir, "messages.jsonl")
+	msgFile := filepath.Join(r.sessionsDir, sessionDir, "messages.jsonl")
 	data, _ := os.ReadFile(msgFile)
 	if !strings.Contains(string(data), "Hi") {
 		t.Errorf("messages.jsonl 应包含用户消息 'Hi'，实际: %s", data)
@@ -557,8 +557,8 @@ func TestNewSessionCreatesAndSavesCurrent(t *testing.T) {
 		t.Errorf("Handler.CurrentSessionID = %q，应等于 %q", r.h.CurrentSessionID(), p.SessionID)
 	}
 
-	// 验证项目目录里至少 1 个会话子目录（旧会话已落盘，排除 .project.json 文件）
-	entries, _ := os.ReadDir(r.projectDir)
+	// 验证 sessions 根目录里至少 1 个会话子目录（旧会话已落盘）
+	entries, _ := os.ReadDir(r.sessionsDir)
 	sessionCount := 0
 	for _, e := range entries {
 		if e.IsDir() {
@@ -858,7 +858,7 @@ func TestDeleteSessionRemovesFileAndNotifies(t *testing.T) {
 	}
 
 	// 文件已删除
-	if _, err := os.Stat(filepath.Join(dir, filepath.Base(handlerTestWorkdir), s1.ID)); !os.IsNotExist(err) {
+	if _, err := os.Stat(sm.SessionDir(s1.ID)); !os.IsNotExist(err) {
 		t.Errorf("会话文件应已删除，实际: %v", err)
 	}
 	// 当前会话未变
@@ -938,7 +938,7 @@ func TestDeleteSessionSwitchesCurrentWhenDeletingCurrent(t *testing.T) {
 		t.Errorf("Handler.CurrentSessionID = %q，期望 %q", h.CurrentSessionID(), s2.ID)
 	}
 	// 旧文件已删除
-	if _, err := os.Stat(filepath.Join(dir, filepath.Base(handlerTestWorkdir), s1.ID)); !os.IsNotExist(err) {
+	if _, err := os.Stat(sm.SessionDir(s1.ID)); !os.IsNotExist(err) {
 		t.Errorf("旧会话文件应已删除，实际: %v", err)
 	}
 }
@@ -1269,8 +1269,8 @@ func TestGetFileDiff_NilStore(t *testing.T) {
 // 且 messages.jsonl 归零，会话目录回到干净状态（保留 session_id）。
 func TestClearSessionRemovesArtifacts(t *testing.T) {
 	r := newTestRig(t, nil)
-	// 注入工具结果存盘器（模拟 main.go 无条件装配），指向与会话管理器同一 projectDir。
-	r.h.SetToolResultStore(memctx.NewToolResultStore(r.sm.ProjectDir()))
+	// 注入工具结果存盘器（模拟 main.go 无条件装配），指向与会话管理器同一 sessions 根目录。
+	r.h.SetToolResultStore(memctx.NewToolResultStore(r.sm.SessionsRoot()))
 
 	sessID := r.h.CurrentSessionID()
 	if sessID == "" {
@@ -1411,14 +1411,14 @@ func newSlashTestRig(t *testing.T, provider SlashCommandProvider) *testRig {
 	t.Cleanup(func() { client.Close() })
 
 	return &testRig{
-		h:          h,
-		mp:         mp,
-		sessDir:    dir,
-		projectDir: filepath.Join(dir, filepath.Base(handlerTestWorkdir)),
-		sm:         sm,
-		srv:        ts,
-		connMgr:    s.ConnectionManager(),
-		client:     client,
+		h:           h,
+		mp:          mp,
+		sessDir:     dir,
+		sessionsDir: sm.SessionsRoot(),
+		sm:          sm,
+		srv:         ts,
+		connMgr:     s.ConnectionManager(),
+		client:      client,
 	}
 }
 

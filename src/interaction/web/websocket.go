@@ -39,6 +39,7 @@ var upgrader = websocket.Upgrader{
 type ConnectionManager struct {
 	mu          sync.RWMutex
 	conns       map[*websocket.Conn]struct{}
+	writeLocks  map[*websocket.Conn]*sync.Mutex
 	router      *Router
 	allClosedCh chan struct{} // 每次活跃连接数 1→0 时发送一次信号
 	// onOpenHook 在每次新连接 Add 之后同步触发，供业务层做"连上即推"逻辑
@@ -57,6 +58,7 @@ func NewConnectionManager(router *Router) *ConnectionManager {
 	}
 	return &ConnectionManager{
 		conns:       make(map[*websocket.Conn]struct{}),
+		writeLocks:  make(map[*websocket.Conn]*sync.Mutex),
 		router:      router,
 		allClosedCh: make(chan struct{}, 1),
 	}
@@ -71,6 +73,9 @@ func (m *ConnectionManager) Router() *Router {
 func (m *ConnectionManager) Add(conn *websocket.Conn) {
 	m.mu.Lock()
 	m.conns[conn] = struct{}{}
+	if _, ok := m.writeLocks[conn]; !ok {
+		m.writeLocks[conn] = &sync.Mutex{}
+	}
 	hooks := append([]func(conn *websocket.Conn){}, m.onOpenHook...)
 	m.mu.Unlock()
 
@@ -109,6 +114,7 @@ func (m *ConnectionManager) Remove(conn *websocket.Conn) {
 	m.mu.Lock()
 	if _, ok := m.conns[conn]; ok {
 		delete(m.conns, conn)
+		delete(m.writeLocks, conn)
 		_ = conn.Close()
 	}
 	allClosed := len(m.conns) == 0
@@ -184,7 +190,7 @@ func (m *ConnectionManager) Broadcast(data []byte) {
 	m.mu.RUnlock()
 
 	for _, c := range conns {
-		if err := c.WriteMessage(websocket.TextMessage, data); err != nil {
+		if err := m.Send(c, data); err != nil {
 			logger.Warn("WebSocket 广播失败",
 				zap.String("remote", c.RemoteAddr().String()),
 				zap.Error(err),
@@ -195,6 +201,13 @@ func (m *ConnectionManager) Broadcast(data []byte) {
 
 // Send 向单个连接发送一条文本消息。
 func (m *ConnectionManager) Send(conn *websocket.Conn, data []byte) error {
+	m.mu.RLock()
+	writeLock := m.writeLocks[conn]
+	m.mu.RUnlock()
+	if writeLock != nil {
+		writeLock.Lock()
+		defer writeLock.Unlock()
+	}
 	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
@@ -207,6 +220,7 @@ func (m *ConnectionManager) CloseAll() {
 		_ = c.Close()
 	}
 	m.conns = make(map[*websocket.Conn]struct{})
+	m.writeLocks = make(map[*websocket.Conn]*sync.Mutex)
 	m.mu.Unlock()
 
 	m.signalAllClosed()
@@ -233,7 +247,7 @@ func (m *ConnectionManager) HandleWS(w http.ResponseWriter, r *http.Request) {
 // HandleWSWithRouter handles a WebSocket connection with a caller-provided
 // router. It is used by the cloud server to bind each authenticated user to
 // that user's isolated Agent runtime.
-func (m *ConnectionManager) HandleWSWithRouter(w http.ResponseWriter, r *http.Request, router *Router, onOpen func(conn *websocket.Conn)) {
+func (m *ConnectionManager) HandleWSWithRouter(w http.ResponseWriter, r *http.Request, router *Router, onOpen func(conn *websocket.Conn), onClose ...func(conn *websocket.Conn)) {
 	if router == nil {
 		http.Error(w, "router not configured", http.StatusInternalServerError)
 		return
@@ -247,9 +261,18 @@ func (m *ConnectionManager) HandleWSWithRouter(w http.ResponseWriter, r *http.Re
 	if onOpen != nil {
 		onOpen(conn)
 	}
+	var closeFn func(*websocket.Conn)
+	if len(onClose) > 0 {
+		closeFn = onClose[0]
+	}
 
 	go func() {
-		defer m.Remove(conn)
+		defer func() {
+			m.Remove(conn)
+			if closeFn != nil {
+				closeFn(conn)
+			}
+		}()
 		router.HandleLoop(conn)
 	}()
 }

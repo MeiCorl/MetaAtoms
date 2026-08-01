@@ -12,7 +12,7 @@ import (
 	"github.com/metaatoms/metaatoms/src/llm"
 )
 
-// testWorkdir 为测试用的稳定项目工作目录，basename = MetaAtoms。
+// testWorkdir 为兼容旧构造参数保留；当前实现不再用它参与路径计算。
 const testWorkdir = "/test/workspace/MetaAtoms"
 
 // newTestSM 构造一个使用临时会话根目录 + 固定 workdir 的 SessionManager。
@@ -567,7 +567,7 @@ func TestSessionRawJSONLContainsToolUseType(t *testing.T) {
 	}
 }
 
-// ---- 新增：append-only 增量 / 容错 / 项目目录 测试 ----
+// ---- 新增：append-only 增量 / 容错 / sessionsRoot 测试 ----
 
 // TestAppendMessagesIncremental 验证多次 Append 只追加、不重写历史。
 func TestAppendMessagesIncremental(t *testing.T) {
@@ -698,8 +698,8 @@ func TestLoadSkipsCorruptedLine(t *testing.T) {
 	}
 }
 
-// TestProjectDirConflictHashSuffix 验证同名 basename 不同路径的项目隔离到不同目录。
-func TestProjectDirConflictHashSuffix(t *testing.T) {
+// TestSessionManagerUsesSessionsRootDirectly 验证 workdir 不再影响会话根目录。
+func TestSessionManagerUsesSessionsRootDirectly(t *testing.T) {
 	root := t.TempDir()
 	sm1, err := NewSessionManagerWithDir(root, "/path/one/demo")
 	if err != nil {
@@ -710,45 +710,27 @@ func TestProjectDirConflictHashSuffix(t *testing.T) {
 		t.Fatalf("sm2 失败: %v", err)
 	}
 
-	// 两者 basename 均为 demo，但 path 不同 → 必须隔离到不同项目目录
-	if sm1.projectDir == sm2.projectDir {
-		t.Fatalf("同名不同路径的项目应隔离到不同目录: %s", sm1.projectDir)
+	if sm1.SessionsRoot() != root {
+		t.Fatalf("SessionsRoot 应返回 sessionsRoot: %s", sm1.SessionsRoot())
 	}
-	// 首个项目用纯 basename，冲突项目用 basename-<hash>
-	if filepath.Base(sm1.projectDir) != "demo" {
-		t.Fatalf("首个项目目录应为 'demo', 实际 %s", filepath.Base(sm1.projectDir))
+	if sm2.SessionsRoot() != root {
+		t.Fatalf("workdir 不应影响 sessionsRoot: %s", sm2.SessionsRoot())
 	}
-	if !strings.HasPrefix(filepath.Base(sm2.projectDir), "demo-") {
-		t.Fatalf("冲突项目目录应以 'demo-' 开头, 实际 %s", filepath.Base(sm2.projectDir))
+	if got := sm1.SessionDir("session-1"); got != filepath.Join(root, "session-1") {
+		t.Fatalf("SessionDir 应直挂 session_id: %s", got)
 	}
 }
 
-// TestProjectDirReuseSamePath 验证相同路径复用同一项目目录。
-func TestProjectDirReuseSamePath(t *testing.T) {
-	root := t.TempDir()
-	sm1, err := NewSessionManagerWithDir(root, "/work/MetaAtoms")
-	if err != nil {
-		t.Fatalf("sm1 失败: %v", err)
-	}
-	sm2, err := NewSessionManagerWithDir(root, "/work/MetaAtoms")
-	if err != nil {
-		t.Fatalf("sm2 失败: %v", err)
-	}
-	if sm1.projectDir != sm2.projectDir {
-		t.Fatalf("同路径应复用同一项目目录: %s vs %s", sm1.projectDir, sm2.projectDir)
-	}
-}
-
-// TestListSessionsScansSubdirsIgnoreFiles 验证列表只扫子目录，
-// 项目目录内的非目录文件（旧 .json / .project.json）被忽略。
+// TestListSessionsScansSubdirsIgnoreFiles 验证列表只扫 sessionsRoot 下的会话子目录，
+// 非目录文件会被忽略。
 func TestListSessionsScansSubdirsIgnoreFiles(t *testing.T) {
 	root := t.TempDir()
 	sm, err := NewSessionManagerWithDir(root, "/proj/MetaAtoms")
 	if err != nil {
 		t.Fatalf("创建 SM 失败: %v", err)
 	}
-	// 在项目目录内放一个旧 .json 文件（非目录），应被 IsDir 过滤忽略
-	if err := os.WriteFile(filepath.Join(sm.projectDir, "legacy.json"), []byte("{}"), 0644); err != nil {
+	// 在 sessionsRoot 内放一个旧 .json 文件（非目录），应被 IsDir 过滤忽略
+	if err := os.WriteFile(filepath.Join(sm.SessionsRoot(), "legacy.json"), []byte("{}"), 0644); err != nil {
 		t.Fatalf("写 legacy.json 失败: %v", err)
 	}
 	// 创建一个有效会话
@@ -765,29 +747,5 @@ func TestListSessionsScansSubdirsIgnoreFiles(t *testing.T) {
 	}
 	if summaries[0].ID != "real-session" {
 		t.Fatalf("应为 real-session, 实际 %s", summaries[0].ID)
-	}
-}
-
-// TestCrossProjectIsolation 验证不同项目目录互不可见。
-func TestCrossProjectIsolation(t *testing.T) {
-	root := t.TempDir()
-	smA, _ := NewSessionManagerWithDir(root, "/work/Alpha")
-	smB, _ := NewSessionManagerWithDir(root, "/work/Beta")
-
-	createTestSession(t, smA, "alpha-session", []llm.Message{
-		{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.NewTextBlock("from alpha")}},
-	})
-	createTestSession(t, smB, "beta-session", []llm.Message{
-		{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.NewTextBlock("from beta")}},
-	})
-
-	// Alpha 项目不应看到 Beta 的会话
-	aSummaries, _ := smA.ListSessions()
-	if len(aSummaries) != 1 || aSummaries[0].ID != "alpha-session" {
-		t.Fatalf("Alpha 项目应只见 alpha-session, 实际 %+v", aSummaries)
-	}
-	bSummaries, _ := smB.ListSessions()
-	if len(bSummaries) != 1 || bSummaries[0].ID != "beta-session" {
-		t.Fatalf("Beta 项目应只见 beta-session, 实际 %+v", bSummaries)
 	}
 }

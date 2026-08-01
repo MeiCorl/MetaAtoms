@@ -22,6 +22,7 @@ type HandlerFunc func(conn *websocket.Conn, msg Message) error
 type Router struct {
 	mu       sync.RWMutex
 	handlers map[string]HandlerFunc
+	resolve  func(conn *websocket.Conn, msg Message) (*Router, error)
 }
 
 // NewRouter 构造空路由。
@@ -29,6 +30,15 @@ func NewRouter() *Router {
 	return &Router{
 		handlers: make(map[string]HandlerFunc),
 	}
+}
+
+// NewDynamicRouter constructs a router that resolves the concrete router for
+// each incoming message. Cloud tenant connections use this to keep an existing
+// WebSocket bound to the latest rebuilt tenant runtime.
+func NewDynamicRouter(resolve func(conn *websocket.Conn, msg Message) (*Router, error)) *Router {
+	r := NewRouter()
+	r.resolve = resolve
+	return r
 }
 
 // Register 注册一个消息类型对应的 handler。同类型重复注册将覆盖前一个。
@@ -61,6 +71,29 @@ func (r *Router) Types() []string {
 //   - 未知类型：记录警告，向客户端发送 stream_error(code=unknown_message_type)，返回 error。
 //   - handler 返回错误：仅记录日志，不重复发送 stream_error（由 handler 自行决定）。
 func (r *Router) Route(conn *websocket.Conn, msg Message) error {
+	if r.resolve != nil {
+		target, err := r.resolve(conn, msg)
+		if err != nil {
+			logger.Warn("动态路由解析失败",
+				zap.String("type", msg.Type),
+				zap.String("remote", conn.RemoteAddr().String()),
+				zap.Error(err),
+			)
+			r.sendDynamicRouteError(conn, err)
+			return err
+		}
+		if target == nil {
+			err := fmt.Errorf("动态路由未返回目标 router")
+			r.sendDynamicRouteError(conn, err)
+			return err
+		}
+		if target == r {
+			err := fmt.Errorf("动态路由返回自身")
+			r.sendDynamicRouteError(conn, err)
+			return err
+		}
+		return target.Route(conn, msg)
+	}
 	r.mu.RLock()
 	h, ok := r.handlers[msg.Type]
 	r.mu.RUnlock()
@@ -81,6 +114,20 @@ func (r *Router) Route(conn *websocket.Conn, msg Message) error {
 		return err
 	}
 	return nil
+}
+
+func (r *Router) sendDynamicRouteError(conn *websocket.Conn, err error) {
+	data, encErr := EncodePayload(MsgTypeStreamError, StreamErrorPayload{
+		Code:    "runtime_reload_failed",
+		Message: err.Error(),
+	})
+	if encErr != nil {
+		logger.Warn("编码动态路由错误消息失败", zap.Error(encErr))
+		return
+	}
+	if writeErr := conn.WriteMessage(websocket.TextMessage, data); writeErr != nil {
+		logger.Warn("发送动态路由错误消息失败", zap.Error(writeErr))
+	}
 }
 
 // HandleLoop 启动 WebSocket 读循环并把消息分发给 router。该方法会阻塞直到连接断开。

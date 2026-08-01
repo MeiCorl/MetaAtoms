@@ -1,28 +1,27 @@
 // Package session 实现会话的本地持久化管理。
 //
-// 存储模型（append-only JSONL + 按项目分目录）：
+// 存储模型（append-only JSONL + 按会话分目录）：
 //
-//	~/.metaatoms/sessions/
-//	└─ {project_name}/                  # 项目目录 = filepath.Base(workdir)，同名冲突时 basename-<hash>
-//	   ├─ .project.json                 # 记录真实 CWD，用于校验/展示
-//	   ├─ {session_id}/
-//	   │  ├─ meta.json                  # {id, created_at, updated_at, message_count}
-//	   │  └─ messages.jsonl             # 每行 1 条 llm.Message，append-only
-//	   └─ {session_id}/...
+//	~/.metaatoms/<user_id>/sessions/
+//	└─ {session_id}/
+//	   ├─ meta.json                     # {id, created_at, updated_at, message_count}
+//	   ├─ messages.jsonl                # 每行 1 条 llm.Message，append-only
+//	   ├─ history_archive.jsonl         # 可选，压缩前的原文归档
+//	   ├─ metaatoms.log                 # 会话级日志
+//	   └─ tool_results/                 # 工具结果归档
 //
 // 设计要点：
 //   - 单次会话生命周期内 history 纯追加，落盘时只在 messages.jsonl 末尾追加新消息行，
 //     不再全量重写（旧的「单文件全量 JSON 覆盖写」模型已废弃）。
-//   - {session_id} 一层目录为后续存放工具调用结果等内容预留空间。
-//   - 列表 / resume / LoadLatest 的作用域均限定在「当前项目目录」内，跨项目天然隔离。
-//   - 旧的 ~/.metaatoms/sessions/*.json 文件不被扫描（列表只读项目目录下的子目录），等价于忽略。
+//   - {session_id} 一层目录为后续存放工具调用结果、上下文压缩归档、会话日志等内容预留空间。
+//   - 列表 / resume / LoadLatest 的作用域均限定在当前 sessionsRoot 内；用户隔离由调用方传入的
+//     ~/.metaatoms/<user_id>/sessions 边界保证。
+//   - 旧的 ~/.metaatoms/sessions/*.json 文件不被扫描（列表只读 sessionsRoot 下的子目录），等价于忽略。
 package session
 
 import (
 	"bufio"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -42,8 +41,6 @@ const (
 	metaFileName = "meta.json"
 	// messagesFileName 为消息日志文件名（append-only JSONL）。
 	messagesFileName = "messages.jsonl"
-	// projectMetaFileName 为项目目录的归属元数据文件名（记录真实 CWD）。
-	projectMetaFileName = ".project.json"
 )
 
 // maxScanLineSize 限制单条消息行的最大字节数（1MB）。
@@ -53,7 +50,7 @@ const maxScanLineSize = 1 << 20
 // Session 代表一次完整的对话会话。
 // 包含会话元信息和所有对话消息。
 // 持久化时元信息写入 meta.json、消息逐行写入 messages.jsonl；
-// 项目归属由「所在项目目录」承担，故结构体内不冗余存储项目路径字段。
+// 用户 / 会话归属由目录边界承担，故结构体内不冗余存储工作目录字段。
 type Session struct {
 	// ID 为会话唯一标识（UUID 格式）
 	ID string `json:"id"`
@@ -65,18 +62,12 @@ type Session struct {
 	Messages []llm.Message `json:"messages"`
 }
 
-// SessionManager 管理会话的持久化存储，作用域限定在单个项目目录内。
+// SessionManager 管理会话的持久化存储，作用域限定在单个 sessionsRoot 内。
 //
 // 字段语义：
-//   - sessionsRoot：所有项目目录的父目录（~/.metaatoms/sessions）
-//   - projectName：当前项目对应的目录名（filepath.Base(workdir)，冲突时 basename-<hash>）
-//   - projectPath：真实工作目录绝对路径（workdir），用于 .project.json 校验/展示
-//   - projectDir：sessionsRoot/projectName，本管理器所有会话操作的根目录
+//   - sessionsRoot：所有会话目录的父目录（如 ~/.metaatoms/<user_id>/sessions）
 type SessionManager struct {
 	sessionsRoot string
-	projectName  string
-	projectPath  string
-	projectDir   string
 }
 
 // SessionSummary 是会话的摘要信息，用于列表展示。
@@ -103,19 +94,8 @@ type sessionMeta struct {
 	MessageCount int       `json:"message_count"`
 }
 
-// projectMeta 为项目目录下 .project.json 的结构，记录该目录归属的真实 CWD。
-// 同名 basename 冲突时用于区分不同项目，避免误合并会话。
-type projectMeta struct {
-	// Path 为创建该目录时的工作目录绝对路径
-	Path string `json:"path"`
-	// Basename 为 filepath.Base(Path)
-	Basename string `json:"basename"`
-	// CreatedAt 为目录首次创建时间
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// NewSessionManager 创建会话管理器，按 workdir 定位到对应项目目录。
-// sessionsRoot 固定为 ~/.metaatoms/sessions；项目目录不存在时自动创建并写入 .project.json。
+// NewSessionManager 创建会话管理器。
+// sessionsRoot 固定为 ~/.metaatoms/sessions；workdir 参数仅为兼容旧调用保留，不再参与路径计算。
 func NewSessionManager(workdir string) (*SessionManager, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -126,165 +106,31 @@ func NewSessionManager(workdir string) (*SessionManager, error) {
 }
 
 // NewSessionManagerWithDir 使用指定 sessionsRoot 创建会话管理器，供测试与自定义部署使用。
-// workdir 用于定位项目目录；项目目录不存在时自动创建。
+// workdir 参数仅为兼容旧调用保留，不再参与路径计算。
 func NewSessionManagerWithDir(sessionsRoot, workdir string) (*SessionManager, error) {
 	return newSessionManager(sessionsRoot, workdir)
 }
 
 // newSessionManager 是两个公开构造函数的共用实现。
-// 永不返回 fatal：项目目录解析失败时降级为哈希目录 + Warn，保证启动不被阻断。
 func newSessionManager(sessionsRoot, workdir string) (*SessionManager, error) {
-	// 确保会话根目录存在
+	_ = workdir
 	if err := os.MkdirAll(sessionsRoot, 0755); err != nil {
 		return nil, fmt.Errorf("创建会话根目录失败: %w", err)
 	}
 
-	projectDir, projectName, err := resolveProjectDir(sessionsRoot, workdir)
-	if err != nil {
-		// 解析失败属于非致命：降级到基于哈希的目录，保证会话功能可用
-		logger.Warn("项目目录解析失败，降级使用哈希目录",
-			zap.String("workdir", workdir), zap.Error(err))
-		projectName = shortHash(workdir)
-		projectDir = filepath.Join(sessionsRoot, projectName)
-		if mkErr := os.MkdirAll(projectDir, 0755); mkErr != nil {
-			return nil, fmt.Errorf("创建降级项目目录失败: %w", mkErr)
-		}
-		// 降级目录同样写一份 .project.json，便于后续识别归属
-		_ = writeProjectMeta(projectDir, workdir)
-	}
-
 	return &SessionManager{
 		sessionsRoot: sessionsRoot,
-		projectName:  projectName,
-		projectPath:  workdir,
-		projectDir:   projectDir,
 	}, nil
 }
 
-// resolveProjectDir 根据 workdir 解析出项目目录路径与目录名。
-//
-// 命名规则与冲突处理：
-//  1. 默认目录名 = filepath.Base(workdir)。
-//  2. 候选目录不存在 → 创建并写入 .project.json，直接使用 basename。
-//  3. 候选目录存在 → 读 .project.json：
-//     a. path 与当前 workdir 相同 → 复用（同项目多次启动）。
-//     b. path 不同或 .project.json 缺失/损坏 → 视为同名冲突，改用 basename-<sha256(workdir)[:8]>。
-func resolveProjectDir(sessionsRoot, workdir string) (projectDir, projectName string, err error) {
-	basename := filepath.Base(workdir)
-	// basename 异常（根目录、空 workdir 等）直接走哈希兜底
-	if !isValidProjectName(basename) {
-		basename = shortHash(workdir)
-		return createOrReuseHashedDir(sessionsRoot, workdir, basename)
-	}
-
-	candidateDir := filepath.Join(sessionsRoot, basename)
-	info, statErr := os.Stat(candidateDir)
-	if os.IsNotExist(statErr) {
-		// 候选目录不存在 → 创建 + 写 .project.json
-		if err = os.MkdirAll(candidateDir, 0755); err != nil {
-			return "", "", fmt.Errorf("创建项目目录失败: %w", err)
-		}
-		if err = writeProjectMeta(candidateDir, workdir); err != nil {
-			return "", "", err
-		}
-		return candidateDir, basename, nil
-	}
-	if statErr != nil {
-		return "", "", fmt.Errorf("检查项目目录失败: %w", statErr)
-	}
-	if !info.IsDir() {
-		// 同名文件占位（如旧 .json）→ 哈希兜底
-		return createOrReuseHashedDir(sessionsRoot, workdir, basename)
-	}
-
-	// 候选目录存在：校验 .project.json 归属
-	storedPath, ok := readProjectMeta(candidateDir)
-	if ok && normalizePath(storedPath) == normalizePath(workdir) {
-		// 同项目复用
-		return candidateDir, basename, nil
-	}
-	// 归属不一致或元数据缺失 → 同名冲突，哈希兜底
-	return createOrReuseHashedDir(sessionsRoot, workdir, basename)
+// SessionsRoot 返回所有会话目录的父目录。
+// 工具结果实际落盘到 <sessionsRoot>/<sessionID>/tool_results/<toolUseID>，
+// 与本管理器的会话目录约定对齐。本 getter 只读返回字符串，不暴露内部可变状态。
+func (sm *SessionManager) SessionsRoot() string {
+	return sm.sessionsRoot
 }
 
-// createOrReuseHashedDir 创建或复用 basename-<hash> 形式的项目目录。
-// 哈希基于 workdir 稳定生成，保证同 workdir 多次启动复用同一哈希目录。
-func createOrReuseHashedDir(sessionsRoot, workdir, basename string) (projectDir, projectName string, err error) {
-	hashedName := basename + "-" + shortHash(workdir)
-	hashedDir := filepath.Join(sessionsRoot, hashedName)
-	if err = os.MkdirAll(hashedDir, 0755); err != nil {
-		return "", "", fmt.Errorf("创建项目目录(哈希兜底)失败: %w", err)
-	}
-	// 写/覆盖 .project.json，保证归属记录正确（已存在则更新 path）
-	if err = writeProjectMeta(hashedDir, workdir); err != nil {
-		return "", "", err
-	}
-	return hashedDir, hashedName, nil
-}
-
-// isValidProjectName 判断目录名是否合法（非空、非路径分隔符、非点号当前目录）。
-func isValidProjectName(name string) bool {
-	if name == "" || name == "." || name == ".." {
-		return false
-	}
-	if name == string(filepath.Separator) {
-		return false
-	}
-	return true
-}
-
-// normalizePath 对路径做基础规范化，用于归属比较（去多余分隔符、统一分隔符）。
-// 注意：不做大小写归一化，跨平台路径大小写差异不在本期处理范围。
-func normalizePath(p string) string {
-	return filepath.Clean(p)
-}
-
-// writeProjectMeta 写入项目目录下的 .project.json。
-func writeProjectMeta(projectDir, projectPath string) error {
-	pm := projectMeta{
-		Path:      projectPath,
-		Basename:  filepath.Base(projectPath),
-		CreatedAt: time.Now(),
-	}
-	data, err := json.MarshalIndent(pm, "", "  ")
-	if err != nil {
-		return fmt.Errorf("序列化项目元数据失败: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, projectMetaFileName), data, 0644); err != nil {
-		return fmt.Errorf("写入项目元数据失败: %w", err)
-	}
-	return nil
-}
-
-// readProjectMeta 读取项目目录下的 .project.json，返回记录的 Path。
-// 文件缺失或损坏返回 ok=false（不视为致命错误）。
-func readProjectMeta(projectDir string) (storedPath string, ok bool) {
-	data, err := os.ReadFile(filepath.Join(projectDir, projectMetaFileName))
-	if err != nil {
-		return "", false
-	}
-	var pm projectMeta
-	if err := json.Unmarshal(data, &pm); err != nil {
-		return "", false
-	}
-	return pm.Path, true
-}
-
-// shortHash 返回字符串的 SHA-256 前 8 位 hex（用于项目目录哈希兜底）。
-func shortHash(s string) string {
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:4]) // 4 字节 = 8 hex 字符
-}
-
-// ProjectDir 返回会话根目录（sessionsRoot/projectName）。
-// 供记忆层上下文压缩子系统（Step 7）在主流程装配时注入 ToolResultStore——
-// 工具结果落盘到 <projectDir>/<sessionID>/tool_results/<toolUseID>，与本管理器
-// 的会话目录约定对齐。本 getter 只读返回字符串，不暴露内部可变状态。
-func (sm *SessionManager) ProjectDir() string {
-	return sm.projectDir
-}
-
-// SessionDir 返回指定会话的完整目录绝对路径（{projectDir}/{sessionID}）。
+// SessionDir 返回指定会话的完整目录绝对路径（{sessionsRoot}/{sessionID}）。
 // 供 logger 会话化子系统取得「当前会话目录」，把核心会话链路日志写到该目录下
 // metaatoms.log。委托私有 sessionDirPath 保持路径拼接的单一来源，避免调用方
 // 重复实现、未来目录结构变化也只需改一处。
@@ -498,11 +344,11 @@ func (sm *SessionManager) readMessagesFile(path string) ([]llm.Message, error) {
 	return messages, nil
 }
 
-// LoadLatest 加载当前项目下最近更新的会话。
-// 扫描项目目录下的子目录（每个子目录是一个 session），按 meta.updated_at 降序取最新。
-// 项目目录不存在或无有效会话时返回 nil，无错误。
+// LoadLatest 加载当前 sessionsRoot 下最近更新的会话。
+// 扫描 sessionsRoot 下的子目录（每个子目录是一个 session），按 meta.updated_at 降序取最新。
+// sessionsRoot 不存在或无有效会话时返回 nil，无错误。
 func (sm *SessionManager) LoadLatest() (*Session, error) {
-	entries, err := os.ReadDir(sm.projectDir)
+	entries, err := os.ReadDir(sm.sessionsRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -517,7 +363,7 @@ func (sm *SessionManager) LoadLatest() (*Session, error) {
 	var cands []candidate
 	for _, entry := range entries {
 		if !entry.IsDir() {
-			continue // 跳过 .project.json 等非目录文件
+			continue // 跳过旧 .json 等非目录文件
 		}
 		sid := entry.Name()
 		meta, ok, _ := sm.readSessionMeta(sid)
@@ -536,7 +382,7 @@ func (sm *SessionManager) LoadLatest() (*Session, error) {
 	return sm.Load(cands[0].id)
 }
 
-// ListSessions 返回当前项目下所有会话的摘要列表，按 UpdatedAt 降序排列。
+// ListSessions 返回当前 sessionsRoot 下所有会话的摘要列表，按 UpdatedAt 降序排列。
 // 对每个 session 子目录读 meta + 扫描 messages.jsonl 取数量与首条用户消息预览，
 // 避免一次性把全部消息载入内存。损坏/缺 meta 的目录跳过并记录日志。
 func (sm *SessionManager) ListSessions() ([]SessionSummary, error) {
@@ -555,9 +401,9 @@ func (sm *SessionManager) ListRecentSessions(limit int) ([]SessionSummary, error
 
 // listSessionsSorted 是 ListSessions / ListRecentSessions 的内部实现。
 // byCreatedAt=true 时按 CreatedAt 降序，否则按 UpdatedAt 降序；
-// limit<=0 表示不限制数量。仅扫描项目目录下的子目录。
+// limit<=0 表示不限制数量。仅扫描 sessionsRoot 下的子目录。
 func (sm *SessionManager) listSessionsSorted(limit int, byCreatedAt bool) ([]SessionSummary, error) {
-	entries, err := os.ReadDir(sm.projectDir)
+	entries, err := os.ReadDir(sm.sessionsRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []SessionSummary{}, nil
@@ -687,9 +533,9 @@ func (sm *SessionManager) Delete(id string) error {
 
 // ---- 路径辅助 ----
 
-// sessionDirPath 返回会话目录的完整路径（{projectDir}/{sessionID}）。
+// sessionDirPath 返回会话目录的完整路径（{sessionsRoot}/{sessionID}）。
 func (sm *SessionManager) sessionDirPath(sessionID string) string {
-	return filepath.Join(sm.projectDir, sessionID)
+	return filepath.Join(sm.sessionsRoot, sessionID)
 }
 
 // messagesFilePath 返回会话消息日志文件的完整路径。

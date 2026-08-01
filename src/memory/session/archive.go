@@ -37,7 +37,7 @@ import (
 // 位于 {session_id} 目录下，与 messages.jsonl 同级。
 const historyArchiveFileName = "history_archive.jsonl"
 
-// archiveFilePath 返回会话历史归档文件的完整路径（{projectDir}/{sessionID}/history_archive.jsonl）。
+// archiveFilePath 返回会话历史归档文件的完整路径（{sessionsRoot}/{sessionID}/history_archive.jsonl）。
 func (sm *SessionManager) archiveFilePath(sessionID string) string {
 	return filepath.Join(sm.sessionDirPath(sessionID), historyArchiveFileName)
 }

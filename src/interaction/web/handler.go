@@ -191,6 +191,10 @@ type Handler struct {
 	// 构造期一次性注入（main.go 在 server 构造后调 SetConnMgr），其后只读，无需加锁。
 	// 为 nil 时 BroadcastMCPStatus 退化为 no-op（兼容未注入场景与测试）。
 	connMgr *ConnectionManager
+	// connSnapshot overrides the broadcast target set. Multi-tenant runtime
+	// wiring uses this to restrict MCP/subagent/slash broadcasts to the
+	// current user's WebSocket connections instead of the process-wide manager.
+	connSnapshot func() []*websocket.Conn
 
 	// subAgentManager lets Stop cancel process-local child agents owned by this handler.
 	subAgentManager *background.Manager
@@ -726,10 +730,10 @@ func (h *Handler) runContinuationFromSubAgent(task background.TaskSnapshot) {
 }
 
 func (h *Handler) firstActiveConn() *websocket.Conn {
-	if h == nil || h.connMgr == nil {
+	if h == nil {
 		return nil
 	}
-	conns := h.connMgr.Snapshot()
+	conns := h.activeConnections()
 	if len(conns) == 0 {
 		return nil
 	}
@@ -1500,6 +1504,13 @@ func (h *Handler) PushSlashCommandsOnOpen(conn *websocket.Conn) {
 	_ = h.sendSlashCommands(conn, MsgTypeSlashCommands)
 }
 
+// PushSlashCommandsUpdated pushes the current slash command list to one
+// connection using the update event type. Tenant hot reload uses this after a
+// runtime rebuild so an idle browser refreshes its slash completion cache.
+func (h *Handler) PushSlashCommandsUpdated(conn *websocket.Conn) {
+	_ = h.sendSlashCommands(conn, MsgTypeSlashCommandsUpdated)
+}
+
 // broadcastSlashCommandsUpdated 向所有活跃 conn 推送 slash_commands_updated。
 //
 // 由 SlashCommandProvider.OnChange 回调触发：注册命令清单变化时（Step 10 Skill
@@ -1510,10 +1521,7 @@ func (h *Handler) PushSlashCommandsOnOpen(conn *websocket.Conn) {
 // 内部持有 writeMu——与 runStream 流式写共享同一把锁；connMgr 为 nil 时退化为
 // no-op（兼容未注入场景与测试）。
 func (h *Handler) broadcastSlashCommandsUpdated() {
-	if h.connMgr == nil {
-		return
-	}
-	for _, conn := range h.connMgr.Snapshot() {
+	for _, conn := range h.activeConnections() {
 		_ = h.sendSlashCommands(conn, MsgTypeSlashCommandsUpdated)
 	}
 }
@@ -1530,6 +1538,23 @@ func (h *Handler) SetMCPPool(pool *mcpsession.Pool) {
 // mgr 为 nil 时 BroadcastMCPStatus 退化为 no-op。
 func (h *Handler) SetConnMgr(mgr *ConnectionManager) {
 	h.connMgr = mgr
+}
+
+// SetConnSnapshotProvider overrides the connection set used by broadcast-style
+// pushes. In multi-tenant mode this must return only the current user's active
+// connections; otherwise global broadcasts can leak status between tenants.
+func (h *Handler) SetConnSnapshotProvider(fn func() []*websocket.Conn) {
+	h.connSnapshot = fn
+}
+
+func (h *Handler) activeConnections() []*websocket.Conn {
+	if h.connSnapshot != nil {
+		return h.connSnapshot()
+	}
+	if h.connMgr == nil {
+		return nil
+	}
+	return h.connMgr.Snapshot()
 }
 
 // SetSubAgentManager injects the process-local SubAgent task manager so Stop can
@@ -1717,11 +1742,8 @@ func (h *Handler) sendMCPStatus(conn *websocket.Conn) error {
 // [Why payload 复用] buildMCPStatusPayload 需遍历 registry 统计工具数、无 conn 依赖，
 // 一次构造给所有连接共用，避免重复计算。
 func (h *Handler) BroadcastMCPStatus() {
-	if h.connMgr == nil {
-		return
-	}
 	payload := h.buildMCPStatusPayload()
-	for _, conn := range h.connMgr.Snapshot() {
+	for _, conn := range h.activeConnections() {
 		_ = h.sendMessage(conn, MsgTypeMCPStatus, payload)
 	}
 }
@@ -1737,10 +1759,7 @@ func (h *Handler) HandleSubAgentTaskEvent(evt background.Event) {
 }
 
 func (h *Handler) BroadcastSubAgentTaskEvent(evt background.Event) {
-	if h.connMgr == nil {
-		return
-	}
-	for _, conn := range h.connMgr.Snapshot() {
+	for _, conn := range h.activeConnections() {
 		_ = h.sendSubAgentTaskEvent(conn, evt)
 	}
 }
@@ -1966,6 +1985,13 @@ func (h *Handler) sendMessage(conn *websocket.Conn, typ string, payload any) err
 	if err != nil {
 		logger.Warn("编码消息失败", zap.String("type", typ), zap.Error(err))
 		return err
+	}
+	if h.connMgr != nil {
+		if err := h.connMgr.Send(conn, data); err != nil {
+			logger.Warn("发送消息失败", zap.String("type", typ), zap.Error(err))
+			return err
+		}
+		return nil
 	}
 	h.writeMu.Lock()
 	defer h.writeMu.Unlock()

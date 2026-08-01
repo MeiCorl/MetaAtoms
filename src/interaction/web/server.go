@@ -48,7 +48,7 @@ type Server struct {
 	router     *Router
 	httpSrv    *http.Server
 	authFunc   func(*http.Request) (string, bool)
-	tenantFunc func(string) (*Router, func(*websocket.Conn), error)
+	tenantFunc func(string) (*Router, func(*websocket.Conn), func(*websocket.Conn), error)
 	httpHooks  []func(*http.ServeMux)
 }
 
@@ -96,7 +96,7 @@ func (s *Server) Router() *Router {
 //
 // 上层若需在 server 真正可服务后再执行，应先 <-server.Ready()，避免轮询或
 // time.Sleep 带来的竞态。
-func (s *Server) SetTenantRouter(auth func(*http.Request) (string, bool), tenant func(string) (*Router, func(*websocket.Conn), error)) {
+func (s *Server) SetTenantRouter(auth func(*http.Request) (string, bool), tenant func(string) (*Router, func(*websocket.Conn), func(*websocket.Conn), error)) {
 	s.authFunc = auth
 	s.tenantFunc = tenant
 }
@@ -129,12 +129,12 @@ func (s *Server) Start(ctx context.Context) error {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		router, onOpen, err := s.tenantFunc(userID)
+		router, onOpen, onClose, err := s.tenantFunc(userID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.wsMgr.HandleWSWithRouter(w, r, router, onOpen)
+		s.wsMgr.HandleWSWithRouter(w, r, router, onOpen, onClose)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/metaatoms-icon.png" || r.URL.Path == "/favicon.ico" {

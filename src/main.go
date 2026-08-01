@@ -18,8 +18,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -68,6 +72,9 @@ import (
 const (
 	// defaultMaxRounds 为兼容旧构造链保留的历史参数；当前不再用于裁剪上下文。
 	defaultMaxRounds = 50
+	// tenantRuntimeRefreshInterval controls proactive hot reload checks for
+	// active tenant runtimes.
+	tenantRuntimeRefreshInterval = 30 * time.Second
 )
 
 func main() {
@@ -452,11 +459,12 @@ func hasBuiltinSkillMDAt(dir string) bool {
 // run 是主流程入口；返回 error 表示启动或运行过程中发生不可恢复错误。
 // 拆出独立函数便于在测试中调用（虽然 step1.1 暂未引入 main 测试）。
 type tenantRuntime struct {
-	router    *web.Router
-	handler   *web.Handler
-	cancel    context.CancelFunc
-	mcpPool   *session.Pool
-	closeOnce sync.Once
+	router      *web.Router
+	handler     *web.Handler
+	fingerprint string
+	cancel      context.CancelFunc
+	mcpPool     *session.Pool
+	closeOnce   sync.Once
 }
 
 type tenantManager struct {
@@ -464,10 +472,16 @@ type tenantManager struct {
 	connMgr *web.ConnectionManager
 	mu      sync.Mutex
 	items   map[string]*tenantRuntime
+	conns   map[string]map[*websocket.Conn]struct{}
 }
 
 func newTenantManager(baseDir string, connMgr *web.ConnectionManager) *tenantManager {
-	return &tenantManager{baseDir: baseDir, connMgr: connMgr, items: make(map[string]*tenantRuntime)}
+	return &tenantManager{
+		baseDir: baseDir,
+		connMgr: connMgr,
+		items:   make(map[string]*tenantRuntime),
+		conns:   make(map[string]map[*websocket.Conn]struct{}),
+	}
 }
 
 func (rt *tenantRuntime) Close() {
@@ -490,32 +504,317 @@ func (m *tenantManager) CloseAll() {
 	for _, rt := range m.items {
 		items = append(items, rt)
 	}
+	conns := make([]*websocket.Conn, 0)
+	for _, byUser := range m.conns {
+		for conn := range byUser {
+			conns = append(conns, conn)
+		}
+	}
+	m.items = make(map[string]*tenantRuntime)
+	m.conns = make(map[string]map[*websocket.Conn]struct{})
 	m.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
 	for _, rt := range items {
 		rt.Close()
 	}
 }
 
-func (m *tenantManager) RouterForUser(userID string) (*web.Router, func(*websocket.Conn), error) {
-	rt, err := m.runtimeForUser(userID)
-	if err != nil {
-		return nil, nil, err
+func (m *tenantManager) RouterForUser(userID string) (*web.Router, func(*websocket.Conn), func(*websocket.Conn), error) {
+	if _, err := m.runtimeForUser(userID); err != nil {
+		return nil, nil, nil, err
 	}
-	return rt.router, rt.handler.PushSlashCommandsOnOpen, nil
+	router := web.NewDynamicRouter(func(conn *websocket.Conn, msg web.Message) (*web.Router, error) {
+		before := m.cachedFingerprint(userID)
+		latest, err := m.runtimeForUser(userID)
+		if err != nil {
+			return nil, err
+		}
+		if before != "" && before != latest.fingerprint {
+			latest.handler.PushSlashCommandsUpdated(conn)
+			latest.handler.BroadcastMCPStatus()
+		}
+		return latest.router, nil
+	})
+	onOpen := func(conn *websocket.Conn) {
+		m.trackConnectionOpen(userID, conn)
+		latest, err := m.runtimeForUser(userID)
+		if err != nil {
+			logger.Warn("tenant runtime refresh on websocket open failed",
+				zap.String("user_id", userID),
+				zap.Error(err),
+			)
+			return
+		}
+		latest.handler.PushSlashCommandsOnOpen(conn)
+	}
+	onClose := func(conn *websocket.Conn) {
+		m.trackConnectionClose(userID, conn)
+	}
+	return router, onOpen, onClose, nil
+}
+
+func (m *tenantManager) trackConnectionOpen(userID string, conn *websocket.Conn) {
+	if userID == "" || conn == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	byUser := m.conns[userID]
+	if byUser == nil {
+		byUser = make(map[*websocket.Conn]struct{})
+		m.conns[userID] = byUser
+	}
+	byUser[conn] = struct{}{}
+}
+
+func (m *tenantManager) trackConnectionClose(userID string, conn *websocket.Conn) {
+	if userID == "" || conn == nil {
+		return
+	}
+	var rt *tenantRuntime
+	m.mu.Lock()
+	if byUser := m.conns[userID]; byUser != nil {
+		delete(byUser, conn)
+		if len(byUser) == 0 {
+			delete(m.conns, userID)
+			rt = m.items[userID]
+			delete(m.items, userID)
+		}
+	}
+	m.mu.Unlock()
+	if rt != nil {
+		rt.Close()
+		logger.Info("tenant runtime closed after last websocket disconnected", zap.String("user_id", userID))
+	}
+}
+
+func (m *tenantManager) CloseUser(userID string) {
+	if userID == "" {
+		return
+	}
+	var rt *tenantRuntime
+	var conns []*websocket.Conn
+	m.mu.Lock()
+	rt = m.items[userID]
+	delete(m.items, userID)
+	if byUser := m.conns[userID]; byUser != nil {
+		conns = make([]*websocket.Conn, 0, len(byUser))
+		for conn := range byUser {
+			conns = append(conns, conn)
+		}
+		delete(m.conns, userID)
+	}
+	m.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+	if rt != nil {
+		rt.Close()
+		logger.Info("tenant runtime closed for user", zap.String("user_id", userID))
+	}
+}
+
+func (m *tenantManager) StartAutoRefresh(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = tenantRuntimeRefreshInterval
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.refreshCachedRuntimes()
+			}
+		}
+	}()
+}
+
+func (m *tenantManager) refreshCachedRuntimes() {
+	users := m.cachedRuntimeUsers()
+	for _, userID := range users {
+		before := m.cachedFingerprint(userID)
+		rt, err := m.runtimeForUser(userID)
+		if err != nil {
+			logger.Warn("tenant runtime auto refresh failed",
+				zap.String("user_id", userID),
+				zap.Error(err),
+			)
+			continue
+		}
+		if before != "" && rt != nil && rt.fingerprint != before {
+			m.pushSlashCommandsUpdated(userID, rt)
+			rt.handler.BroadcastMCPStatus()
+		}
+	}
+}
+
+func (m *tenantManager) cachedRuntimeUsers() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	users := make([]string, 0, len(m.items))
+	for userID := range m.items {
+		users = append(users, userID)
+	}
+	return users
+}
+
+func (m *tenantManager) pushSlashCommandsUpdated(userID string, rt *tenantRuntime) {
+	if rt == nil || rt.handler == nil {
+		return
+	}
+	conns := m.connectionsForUser(userID)
+	for _, conn := range conns {
+		rt.handler.PushSlashCommandsUpdated(conn)
+	}
+}
+
+func (m *tenantManager) connectionsForUser(userID string) []*websocket.Conn {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	byUser := m.conns[userID]
+	if len(byUser) == 0 {
+		return nil
+	}
+	conns := make([]*websocket.Conn, 0, len(byUser))
+	for conn := range byUser {
+		conns = append(conns, conn)
+	}
+	return conns
 }
 
 func (m *tenantManager) runtimeForUser(userID string) (*tenantRuntime, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if rt := m.items[userID]; rt != nil {
+	var oldToClose *tenantRuntime
+	defer func() {
+		m.mu.Unlock()
+		if oldToClose != nil {
+			oldToClose.Close()
+			logger.Info("tenant runtime hot reloaded", zap.String("user_id", userID))
+		}
+	}()
+	fingerprint, fpErr := m.fingerprintForUser(userID)
+	if rt := m.items[userID]; rt != nil && fpErr != nil {
+		logger.Warn("tenant runtime fingerprint failed; keeping cached runtime",
+			zap.String("user_id", userID),
+			zap.Error(fpErr),
+		)
 		return rt, nil
 	}
-	rt, err := m.buildRuntime(userID)
+	if rt := m.items[userID]; rt != nil && rt.fingerprint == fingerprint {
+		return rt, nil
+	}
+	if fpErr != nil {
+		return nil, fpErr
+	}
+	old := m.items[userID]
+	rt, err := m.buildRuntime(userID, fingerprint)
 	if err != nil {
+		if old != nil {
+			logger.Warn("tenant runtime hot reload failed; keeping cached runtime",
+				zap.String("user_id", userID),
+				zap.Error(err),
+			)
+			return old, nil
+		}
 		return nil, err
 	}
 	m.items[userID] = rt
+	if old != nil {
+		oldToClose = old
+	}
 	return rt, nil
+}
+
+func (m *tenantManager) cachedFingerprint(userID string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rt := m.items[userID]; rt != nil {
+		return rt.fingerprint
+	}
+	return ""
+}
+
+func (m *tenantManager) fingerprintForUser(userID string) (string, error) {
+	userDir := auth.UserDir(m.baseDir, userID)
+	return fingerprintPaths([]string{
+		filepath.Join(m.baseDir, "setting.json"),
+		filepath.Join(userDir, "setting.json"),
+		filepath.Join(m.baseDir, "skills"),
+		filepath.Join(userDir, "skills"),
+		filepath.Join(m.baseDir, "agents"),
+		filepath.Join(userDir, "agents"),
+	})
+}
+
+func fingerprintPaths(paths []string) (string, error) {
+	h := sha256.New()
+	for _, path := range paths {
+		if err := fingerprintPath(h, path); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func fingerprintPath(w io.Writer, path string) error {
+	clean := filepath.Clean(path)
+	info, err := os.Stat(clean)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			_, _ = fmt.Fprintf(w, "missing:%s\n", filepath.ToSlash(clean))
+			return nil
+		}
+		return fmt.Errorf("fingerprint stat %s: %w", clean, err)
+	}
+	if !info.IsDir() {
+		return fingerprintFile(w, clean, clean, info)
+	}
+	return filepath.WalkDir(clean, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("fingerprint walk %s: %w", path, walkErr)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("fingerprint info %s: %w", path, err)
+		}
+		if info.IsDir() {
+			rel, _ := filepath.Rel(clean, path)
+			_, _ = fmt.Fprintf(w, "dir:%s\n", filepath.ToSlash(filepath.Join(clean, rel)))
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			_, _ = fmt.Fprintf(w, "skip:%s:%s\n", filepath.ToSlash(path), info.Mode().String())
+			return nil
+		}
+		return fingerprintFile(w, clean, path, info)
+	})
+}
+
+func fingerprintFile(w io.Writer, root, path string, info os.FileInfo) error {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		rel = path
+	}
+	_, _ = fmt.Fprintf(w, "file:%s:%d:%d\n",
+		filepath.ToSlash(filepath.Join(root, rel)),
+		info.Size(),
+		info.ModTime().UnixNano(),
+	)
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("fingerprint open %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := io.Copy(w, f); err != nil {
+		return fmt.Errorf("fingerprint read %s: %w", path, err)
+	}
+	_, _ = io.WriteString(w, "\n")
+	return nil
 }
 
 func buildTenantSkillRootBySource(userDir, globalDir, execDir string) map[skill.Source]string {
@@ -602,7 +901,7 @@ func startTenantMCP(ctx context.Context, mcpPool *session.Pool, mcpBuild *mcpcon
 	}()
 }
 
-func (m *tenantManager) buildRuntime(userID string) (*tenantRuntime, error) {
+func (m *tenantManager) buildRuntime(userID, fingerprint string) (*tenantRuntime, error) {
 	userDir := auth.UserDir(m.baseDir, userID)
 	if err := ensureTenantDirs(userDir); err != nil {
 		return nil, err
@@ -722,6 +1021,9 @@ func (m *tenantManager) buildRuntime(userID string) (*tenantRuntime, error) {
 
 	handler := web.NewHandler(provider, sessMgr, cfg, defaultMaxRounds, promptBuilder, cfg.ContextWindowSize, userDir, toolRegistry, toolHandler, fileDiffStore)
 	handler.SetConnMgr(m.connMgr)
+	handler.SetConnSnapshotProvider(func() []*websocket.Conn {
+		return m.connectionsForUser(userID)
+	})
 	handler.SetReviewer(memoryReviewer)
 	handler.SetSkillProvider(newSkillProviderAdapter(skillReg))
 
@@ -760,7 +1062,7 @@ func (m *tenantManager) buildRuntime(userID string) (*tenantRuntime, error) {
 		cfg.Tools.Enabled = ensureEnabledTools(cfg.Tools.Enabled, subagenttool.AgentToolName, subagenttool.TaskStatusToolName)
 	}
 
-	toolResultStore := memctx.NewToolResultStore(sessMgr.ProjectDir())
+	toolResultStore := memctx.NewToolResultStore(sessMgr.SessionsRoot())
 	handler.SetToolResultStore(toolResultStore)
 	if cfg.Compaction.IsEnabled() {
 		lightCompactor := memctx.NewLightCompactor(toolResultStore, cfg.Compaction)
@@ -777,7 +1079,7 @@ func (m *tenantManager) buildRuntime(userID string) (*tenantRuntime, error) {
 	router := web.NewRouter()
 	handler.Register(router)
 	logger.Info("tenant runtime ready", zap.String("user_id", userID), zap.String("user_dir", userDir))
-	return &tenantRuntime{router: router, handler: handler, cancel: runtimeCancel, mcpPool: mcpPool}, nil
+	return &tenantRuntime{router: router, handler: handler, fingerprint: fingerprint, cancel: runtimeCancel, mcpPool: mcpPool}, nil
 }
 
 func ensureTenantDirs(userDir string) error {
@@ -840,11 +1142,12 @@ func run() error {
 	defer tenants.CloseAll()
 	server.SetTenantRouter(authStore.UserIDFromRequest, tenants.RouterForUser)
 	server.AddHTTPHandlers(func(mux *http.ServeMux) {
-		registerAuthAPI(mux, authStore)
+		registerAuthAPI(mux, authStore, tenants)
 	})
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	tenants.StartAutoRefresh(runCtx, tenantRuntimeRefreshInterval)
 	serverErrCh := make(chan error, 1)
 	go func() {
 		if err := server.Start(runCtx); err != nil {
@@ -887,7 +1190,7 @@ func run() error {
 	return nil
 }
 
-func registerAuthAPI(mux *http.ServeMux, store *auth.Store) {
+func registerAuthAPI(mux *http.ServeMux, store *auth.Store, tenants *tenantManager) {
 	type authRequest struct {
 		Nickname string `json:"nickname"`
 		Email    string `json:"email"`
@@ -943,8 +1246,12 @@ func registerAuthAPI(mux *http.ServeMux, store *auth.Store) {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"user_id": user.UserID, "nickname": user.Nickname, "email": user.Email})
 	})
 	mux.HandleFunc("/api/logout", func(w http.ResponseWriter, r *http.Request) {
+		userID, _ := store.UserIDFromRequest(r)
 		if c, err := r.Cookie(auth.CookieName); err == nil {
 			store.Logout(c.Value)
+		}
+		if tenants != nil && userID != "" {
+			tenants.CloseUser(userID)
 		}
 		auth.ClearSessionCookie(w)
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
