@@ -217,11 +217,21 @@ type SlashCommandRequest struct {
 // SessionSummary 会话摘要，用于会话列表展示。
 // CreatedAt 暴露给前端用于「按创建时间倒序」的表格视图。
 type SessionSummary struct {
-	ID           string    `json:"id"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	MessageCount int       `json:"message_count"`
-	Preview      string    `json:"preview"`
+	ID                string             `json:"id"`
+	CreatedAt         time.Time          `json:"created_at"`
+	UpdatedAt         time.Time          `json:"updated_at"`
+	MessageCount      int                `json:"message_count"`
+	Preview           string             `json:"preview"`
+	GeneratedProjects []GeneratedProject `json:"generated_projects,omitempty"`
+}
+
+type GeneratedProject struct {
+	Name         string    `json:"name"`
+	Path         string    `json:"path"`
+	WorkflowID   string    `json:"workflow_id,omitempty"`
+	WorkflowPath string    `json:"workflow_path,omitempty"`
+	CreatedAt    time.Time `json:"created_at,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 }
 
 // ListSessionsPayload 列出历史会话请求。

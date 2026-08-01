@@ -49,6 +49,14 @@
         spModalSystem:  $('sp-modal-system'),
         spModalLead:    $('sp-modal-lead'),
         spModalStats:   $('sp-modal-stats'),
+        clarificationModal:       $('clarification-modal'),
+        clarificationSummary:     $('clarification-modal-summary'),
+        clarificationTabs:        $('clarification-tabs'),
+        clarificationPanel:       $('clarification-panel'),
+        clarificationError:       $('clarification-error'),
+        clarificationPrevBtn:     $('clarification-prev-btn'),
+        clarificationNextBtn:     $('clarification-next-btn'),
+        clarificationSubmitBtn:   $('clarification-submit-btn'),
         // 亮色 / 暗色 主题切换按钮：紧贴就绪状态右侧，点击翻转 data-theme
         themeToggle:    $('theme-toggle'),
         userMenu:       $('user-menu'),
@@ -163,6 +171,15 @@
         projectSearchPending: null,
         projectSearchSeq: 0,
         projectPanelBound: false,
+        clarification: {
+            sourceKey: '',
+            workflowId: '',
+            docsDir: '',
+            summary: '',
+            cards: [],
+            activeIndex: 0,
+            answers: {},
+        },
     };
 
     // ---- / 快捷命令清单 ----
@@ -608,6 +625,7 @@
         }));
         state._subAgentById = {};
         state._activeSubAgentIds = {};
+        closeClarificationModal();
         renderAllMessages();
         updateSessionHeader(p.summary);
         // 同步模型名（后端在 session_loaded 中带回 model 字段）
@@ -3295,6 +3313,7 @@
 
         // 3. 对已渲染的内容执行最终增强：hljs 语法高亮、代码块 header（复制按钮）、JSON 校验
         enhanceCodeBlocks(bubble);
+        maybeOpenClarificationModal(text);
 
         // 4. 固化为普通消息
         state.messages.push({ role: 'assistant', content: text });
@@ -3628,6 +3647,367 @@
         }
     }
 
+    // ---- product-delivery 需求澄清弹窗 ----
+
+    function tryParseJSON(raw) {
+        if (!raw || typeof raw !== 'string') return null;
+        try { return JSON.parse(raw.trim()); } catch { return null; }
+    }
+
+    function unwrapClarificationPayload(obj) {
+        if (!obj || typeof obj !== 'object') return null;
+        const payload = obj.parsed_json || obj.structured_output?.parsed_json || obj;
+        const cards = payload.clarification_cards || payload.cards;
+        const status = payload.status || payload.clarifications?.status;
+        if (status !== 'needs_clarification' && payload.type !== 'clarification_request') return null;
+        if (!Array.isArray(cards) || cards.length === 0) return null;
+        return {
+            schema_version: payload.schema_version || 'product-delivery/v1',
+            type: payload.type || 'clarification_request',
+            status: 'needs_clarification',
+            workflow_id: payload.workflow_id || '',
+            docs_dir: payload.docs_dir || '',
+            summary: payload.summary || payload.message || '请确认以下需求选项。',
+            clarification_cards: cards,
+        };
+    }
+
+    function parseClarificationPayload(text) {
+        const candidates = [];
+        const trimmed = String(text || '').trim();
+        if (!trimmed) return null;
+        candidates.push(trimmed);
+
+        const fenceRe = /```(?:json)?\s*([\s\S]*?)```/gi;
+        let match;
+        while ((match = fenceRe.exec(trimmed)) !== null) {
+            candidates.push(match[1]);
+        }
+
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+        }
+
+        for (const candidate of candidates) {
+            const payload = unwrapClarificationPayload(tryParseJSON(candidate));
+            if (payload) return payload;
+        }
+        return null;
+    }
+
+    function normalizeClarificationCards(cards) {
+        return (cards || []).map((card, index) => {
+            const id = String(card.id || `q${index + 1}`);
+            const options = Array.isArray(card.options) ? card.options.map((opt, optIndex) => ({
+                value: String(opt.value || `option_${optIndex + 1}`),
+                label: String(opt.label || opt.value || `选项 ${optIndex + 1}`),
+                description: String(opt.description || ''),
+                recommended: opt.recommended === true,
+            })) : [];
+            return {
+                id,
+                title: String(card.title || `问题 ${index + 1}`),
+                question: String(card.question || card.title || `问题 ${index + 1}`),
+                required: card.required !== false,
+                allow_custom: true,
+                options,
+            };
+        }).filter(card => card.options.length > 0 || card.allow_custom);
+    }
+
+    function makeClarificationSourceKey(payload, cards) {
+        const ids = cards.map(card => card.id).join('|');
+        return [state.sessionId || '', payload.workflow_id || '', ids, payload.summary || ''].join('::');
+    }
+
+    function maybeOpenClarificationModal(text) {
+        const payload = parseClarificationPayload(text);
+        if (!payload || !dom.clarificationModal) return;
+
+        const cards = normalizeClarificationCards(payload.clarification_cards);
+        if (!cards.length) return;
+
+        const sourceKey = makeClarificationSourceKey(payload, cards);
+        if (state.clarification.sourceKey === sourceKey && !dom.clarificationModal.hidden) return;
+
+        const answers = {};
+        for (const card of cards) {
+            const recommended = card.options.find(opt => opt.recommended);
+            if (recommended) {
+                answers[card.id] = {
+                    kind: 'option',
+                    value: recommended.value,
+                    label: recommended.label,
+                    description: recommended.description,
+                    recommended: true,
+                };
+            }
+        }
+
+        state.clarification = {
+            sourceKey,
+            workflowId: payload.workflow_id || '',
+            docsDir: payload.docs_dir || '',
+            summary: payload.summary || '请确认以下需求选项。',
+            cards,
+            activeIndex: 0,
+            answers,
+        };
+        openClarificationModal();
+    }
+
+    function openClarificationModal() {
+        if (!dom.clarificationModal) return;
+        dom.clarificationModal.hidden = false;
+        renderClarificationModal();
+    }
+
+    function closeClarificationModal() {
+        if (dom.clarificationModal) dom.clarificationModal.hidden = true;
+    }
+
+    function getClarificationAnswer(card) {
+        return state.clarification.answers[card.id] || null;
+    }
+
+    function isClarificationAnswerComplete(card) {
+        if (!card.required) return true;
+        const answer = getClarificationAnswer(card);
+        if (!answer) return false;
+        if (answer.kind === 'custom') return Boolean((answer.custom_text || '').trim());
+        return Boolean(answer.value);
+    }
+
+    function findFirstIncompleteClarificationIndex() {
+        return state.clarification.cards.findIndex(card => !isClarificationAnswerComplete(card));
+    }
+
+    function updateClarificationSubmitState() {
+        const total = state.clarification.cards.length;
+        const completed = state.clarification.cards.filter(isClarificationAnswerComplete).length;
+        if (dom.clarificationSummary) {
+            const base = state.clarification.summary || '请确认以下需求选项。';
+            dom.clarificationSummary.textContent = `${base}（${completed}/${total} 已完成）`;
+        }
+        if (dom.clarificationSubmitBtn) {
+            dom.clarificationSubmitBtn.disabled = completed < total || isAgentBusy();
+        }
+    }
+
+    function renderClarificationModal() {
+        const cards = state.clarification.cards;
+        const activeIndex = Math.min(Math.max(state.clarification.activeIndex, 0), Math.max(cards.length - 1, 0));
+        state.clarification.activeIndex = activeIndex;
+        const activeCard = cards[activeIndex];
+
+        if (dom.clarificationTabs) {
+            dom.clarificationTabs.innerHTML = cards.map((card, index) => {
+                const active = index === activeIndex;
+                const complete = isClarificationAnswerComplete(card);
+                return `
+                    <button class="clarification-tab${active ? ' is-active' : ''}${complete ? ' is-complete' : ''}"
+                        type="button" role="tab" aria-selected="${active ? 'true' : 'false'}"
+                        data-clarification-index="${index}">
+                        <span class="clarification-tab-index">${index + 1}</span>
+                        <span class="clarification-tab-label">${escapeHTML(card.title)}</span>
+                    </button>`;
+            }).join('');
+            dom.clarificationTabs.querySelectorAll('[data-clarification-index]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    state.clarification.activeIndex = Number(btn.dataset.clarificationIndex || '0');
+                    hideClarificationError();
+                    renderClarificationModal();
+                });
+            });
+        }
+
+        if (dom.clarificationPanel && activeCard) {
+            const answer = getClarificationAnswer(activeCard);
+            const customText = answer?.kind === 'custom' ? answer.custom_text || '' : '';
+            const optionsHTML = activeCard.options.map(opt => {
+                const checked = answer?.kind === 'option' && answer.value === opt.value;
+                return `
+                    <label class="clarification-option${checked ? ' is-selected' : ''}">
+                        <input type="radio" name="clarification-choice" value="${escapeHTML(opt.value)}" ${checked ? 'checked' : ''}>
+                        <span class="clarification-option-copy">
+                            <span class="clarification-option-title">
+                                ${escapeHTML(opt.label)}
+                                ${opt.recommended ? '<span class="clarification-recommended">推荐</span>' : ''}
+                            </span>
+                            ${opt.description ? `<span class="clarification-option-desc">${escapeHTML(opt.description)}</span>` : ''}
+                        </span>
+                    </label>`;
+            }).join('');
+
+            const customChecked = answer?.kind === 'custom';
+            dom.clarificationPanel.innerHTML = `
+                <div class="clarification-question-head">
+                    <span class="clarification-question-count">问题 ${activeIndex + 1}/${cards.length}</span>
+                    ${activeCard.required ? '<span class="clarification-required">必选</span>' : '<span class="clarification-optional">可跳过</span>'}
+                </div>
+                <h3 class="clarification-question-title">${escapeHTML(activeCard.title)}</h3>
+                <p class="clarification-question-text">${escapeHTML(activeCard.question)}</p>
+                <div class="clarification-options">
+                    ${optionsHTML}
+                    <label class="clarification-option clarification-option-custom${customChecked ? ' is-selected' : ''}">
+                        <input type="radio" name="clarification-choice" value="__custom__" ${customChecked ? 'checked' : ''}>
+                        <span class="clarification-option-copy">
+                            <span class="clarification-option-title">其它</span>
+                            <input class="clarification-custom-input" type="text" value="${escapeHTML(customText)}" placeholder="输入你的自定义选择">
+                        </span>
+                    </label>
+                </div>`;
+
+            dom.clarificationPanel.querySelectorAll('input[name="clarification-choice"]').forEach(radio => {
+                radio.addEventListener('change', () => {
+                    let focusCustomAfterRender = false;
+                    if (radio.value === '__custom__') {
+                        const input = dom.clarificationPanel.querySelector('.clarification-custom-input');
+                        state.clarification.answers[activeCard.id] = {
+                            kind: 'custom',
+                            value: '__custom__',
+                            label: '其它',
+                            custom_text: input ? input.value : '',
+                        };
+                        focusCustomAfterRender = true;
+                    } else {
+                        const opt = activeCard.options.find(item => item.value === radio.value);
+                        if (opt) {
+                            state.clarification.answers[activeCard.id] = {
+                                kind: 'option',
+                                value: opt.value,
+                                label: opt.label,
+                                description: opt.description,
+                                recommended: opt.recommended,
+                            };
+                        }
+                    }
+                    hideClarificationError();
+                    renderClarificationModal();
+                    if (focusCustomAfterRender) {
+                        const input = dom.clarificationPanel?.querySelector('.clarification-custom-input');
+                        if (input) input.focus();
+                    }
+                });
+            });
+
+            const customInput = dom.clarificationPanel.querySelector('.clarification-custom-input');
+            if (customInput) {
+                customInput.addEventListener('focus', () => {
+                    state.clarification.answers[activeCard.id] = {
+                        kind: 'custom',
+                        value: '__custom__',
+                        label: '其它',
+                        custom_text: customInput.value,
+                    };
+                    const customRadio = dom.clarificationPanel.querySelector('input[value="__custom__"]');
+                    if (customRadio) customRadio.checked = true;
+                    updateClarificationSubmitState();
+                });
+                customInput.addEventListener('input', () => {
+                    state.clarification.answers[activeCard.id] = {
+                        kind: 'custom',
+                        value: '__custom__',
+                        label: '其它',
+                        custom_text: customInput.value,
+                    };
+                    hideClarificationError();
+                    updateClarificationSubmitState();
+                });
+            }
+        }
+
+        if (dom.clarificationPrevBtn) {
+            dom.clarificationPrevBtn.disabled = activeIndex <= 0;
+            dom.clarificationPrevBtn.onclick = () => {
+                state.clarification.activeIndex = Math.max(0, state.clarification.activeIndex - 1);
+                hideClarificationError();
+                renderClarificationModal();
+            };
+        }
+        if (dom.clarificationNextBtn) {
+            dom.clarificationNextBtn.disabled = activeIndex >= cards.length - 1;
+            dom.clarificationNextBtn.onclick = () => {
+                state.clarification.activeIndex = Math.min(cards.length - 1, state.clarification.activeIndex + 1);
+                hideClarificationError();
+                renderClarificationModal();
+            };
+        }
+        if (dom.clarificationSubmitBtn) {
+            dom.clarificationSubmitBtn.onclick = submitClarificationAnswers;
+        }
+        updateClarificationSubmitState();
+    }
+
+    function showClarificationError(text) {
+        if (!dom.clarificationError) return;
+        dom.clarificationError.textContent = text;
+        dom.clarificationError.hidden = false;
+    }
+
+    function hideClarificationError() {
+        if (!dom.clarificationError) return;
+        dom.clarificationError.hidden = true;
+        dom.clarificationError.textContent = '';
+    }
+
+    function buildClarificationAnswerPayload() {
+        const answers = {};
+        for (const card of state.clarification.cards) {
+            const answer = getClarificationAnswer(card);
+            if (!answer) continue;
+            answers[card.id] = {
+                question: card.question,
+                value: answer.kind === 'custom' ? 'custom' : answer.value,
+                label: answer.kind === 'custom' ? '其它' : answer.label,
+                description: answer.description || '',
+                custom: answer.kind === 'custom',
+                custom_text: answer.kind === 'custom' ? (answer.custom_text || '').trim() : '',
+            };
+        }
+        return {
+            schema_version: 'product-delivery/v1',
+            type: 'clarification_answers',
+            workflow_id: state.clarification.workflowId || '',
+            docs_dir: state.clarification.docsDir || '',
+            answers,
+        };
+    }
+
+    function formatClarificationAnswerMessage(payload) {
+        const lines = ['我已完成需求澄清选择，请按以下结构化结果继续 product-delivery 工作流。', ''];
+        lines.push('```json');
+        lines.push(JSON.stringify(payload, null, 2));
+        lines.push('```');
+        return lines.join('\n');
+    }
+
+    function submitClarificationAnswers() {
+        const missingIndex = findFirstIncompleteClarificationIndex();
+        if (missingIndex >= 0) {
+            state.clarification.activeIndex = missingIndex;
+            renderClarificationModal();
+            showClarificationError('请先完成当前必选问题。');
+            return;
+        }
+        if (isAgentBusy()) {
+            showClarificationError('当前智能体仍在处理，请稍后再提交。');
+            return;
+        }
+        const payload = buildClarificationAnswerPayload();
+        const sent = sendUserInputText(formatClarificationAnswerMessage(payload), { clearInput: false });
+        if (sent) closeClarificationModal();
+    }
+
+    function bindClarificationModal() {
+        if (!dom.clarificationModal) return;
+        dom.clarificationModal.querySelectorAll('[data-clarification-modal-close]').forEach(el => {
+            el.addEventListener('click', closeClarificationModal);
+        });
+    }
+
     // ---- 上下文进度条 ----
     function renderCtxBar() {
         const v = state.ctx.percentLeft;
@@ -3740,27 +4120,29 @@
             }
         }
 
-        // 表格视图打开时，用户开始输入新对话即收起表格
+        sendUserInputText(raw);
+    }
+
+    function sendUserInputText(text, options = {}) {
+        const raw = String(text || '');
+        if (!raw.trim()) return false;
+        if (state.streaming) return false;
         if (state.sessionsTableActive) {
             hideSessionsTable();
         }
-
-        // 清空空状态
         const empty = dom.messages.querySelector('.messages-empty');
         if (empty) empty.remove();
-        // 用户消息节点
         state.messages.push({ role: 'user', content: raw });
         appendMessageNode('user', raw, false);
         scrollToBottomIfNeeded();
-        dom.input.value = '';
-        updateCharCount();
+        if (options.clearInput !== false) {
+            dom.input.value = '';
+            updateCharCount();
+        }
         closeSlashDropdown();
-        // 立即插入 thinking 占位，标记"等待 assistant 首个 chunk"
-        // 首个 stream_chunk 到达时由 onStreamChunk 移除
         state.expectingAssistant = true;
         showThinking();
-        // 发送
-        sendWS(MsgType.UserInput, { text: raw });
+        return sendWS(MsgType.UserInput, { text: raw });
     }
 
     function updateCharCount() {
@@ -3985,6 +4367,10 @@
 
     function bindGlobalKeys() {
         document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && dom.clarificationModal && !dom.clarificationModal.hidden) {
+                closeClarificationModal();
+                return;
+            }
             // 全局 Esc 关闭下拉
             if (e.key === 'Escape' && state.slashOpen) closeSlashDropdown();
         });
@@ -4050,6 +4436,7 @@
         bindNewSessionBtn();
         bindScrollWatcher();
         bindDevPanel();
+        bindClarificationModal();
         bindProjectFilePanel();
         bindUserMenu();
         bindCompactBtn();

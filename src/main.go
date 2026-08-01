@@ -1026,6 +1026,8 @@ func (m *tenantManager) buildRuntime(userID, fingerprint string) (*tenantRuntime
 	})
 	handler.SetReviewer(memoryReviewer)
 	handler.SetSkillProvider(newSkillProviderAdapter(skillReg))
+	toolRegistry.MustReplace(web.NewAssociateProjectTool(userDir, handler))
+	cfg.Tools.Enabled = ensureEnabledTools(cfg.Tools.Enabled, web.AssociateProjectToolName)
 
 	slashRegistry := slash.NewRegistry()
 	if err := slash.RegisterBuiltin(slashRegistry, handler); err != nil {
@@ -1083,7 +1085,7 @@ func (m *tenantManager) buildRuntime(userID, fingerprint string) (*tenantRuntime
 }
 
 func ensureTenantDirs(userDir string) error {
-	for _, name := range []string{"", "sessions", "logs", "memory", "skills", "agents"} {
+	for _, name := range []string{"", "sessions", "logs", "memory", "skills", "agents", "workspace"} {
 		dir := userDir
 		if name != "" {
 			dir = filepath.Join(userDir, name)

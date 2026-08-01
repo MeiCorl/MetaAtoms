@@ -1,4 +1,4 @@
-package session
+﻿package session
 
 import (
 	"encoding/json"
@@ -723,6 +723,51 @@ func TestSessionManagerUsesSessionsRootDirectly(t *testing.T) {
 
 // TestListSessionsScansSubdirsIgnoreFiles 验证列表只扫 sessionsRoot 下的会话子目录，
 // 非目录文件会被忽略。
+func TestAssociateGeneratedProjectRoundTrip(t *testing.T) {
+	sm := newTestSM(t)
+	sid := "project-session"
+	createTestSession(t, sm, sid, []llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.NewTextBlock("build a game")}},
+	})
+
+	project := GeneratedProject{
+		Name:         "breakout-game",
+		Path:         filepath.Join("workspace", "breakout-game"),
+		WorkflowID:   "breakout-game",
+		WorkflowPath: filepath.Join("workspace", "breakout-game", "docs", "workflow.json"),
+	}
+	if err := sm.AssociateGeneratedProject(sid, project); err != nil {
+		t.Fatalf("AssociateGeneratedProject failed: %v", err)
+	}
+	updated := project
+	updated.WorkflowID = "breakout-game-v2"
+	if err := sm.AssociateGeneratedProject(sid, updated); err != nil {
+		t.Fatalf("AssociateGeneratedProject update failed: %v", err)
+	}
+
+	loaded, err := sm.Load(sid)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(loaded.GeneratedProjects) != 1 {
+		t.Fatalf("GeneratedProjects length = %d, want 1", len(loaded.GeneratedProjects))
+	}
+	if loaded.GeneratedProjects[0].WorkflowID != "breakout-game-v2" {
+		t.Fatalf("WorkflowID = %q, want breakout-game-v2", loaded.GeneratedProjects[0].WorkflowID)
+	}
+	if loaded.GeneratedProjects[0].CreatedAt.IsZero() || loaded.GeneratedProjects[0].UpdatedAt.IsZero() {
+		t.Fatalf("project timestamps should be populated: %+v", loaded.GeneratedProjects[0])
+	}
+
+	summaries, err := sm.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions failed: %v", err)
+	}
+	if len(summaries) != 1 || len(summaries[0].GeneratedProjects) != 1 {
+		t.Fatalf("summary should include generated project: %+v", summaries)
+	}
+}
+
 func TestListSessionsScansSubdirsIgnoreFiles(t *testing.T) {
 	root := t.TempDir()
 	sm, err := NewSessionManagerWithDir(root, "/proj/MetaAtoms")

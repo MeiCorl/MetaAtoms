@@ -10,7 +10,7 @@
 |------|------|--------|----------|
 | 用户级 | `~/.metaatoms/${user_id}/agents/*.md` | 最高 | 当前登录用户的自定义角色 |
 | 全局 | `~/.metaatoms/agents/*.md` | 中 | 平台/管理员维护的通用角色 |
-| 内置 | `<exec>/subagent/builtin/*.md` 与内嵌资源 | 最低 | `explore` / `plan` / `general-purpose` 兜底角色 |
+| 内置 | `<exec>/subagent/builtin/*.md` 与内嵌资源 | 最低 | `explore` / `plan` / `general-purpose` 兜底角色，以及 `product-manager` / `architect` / `tech-lead` / `engineer` / `tester` 产品交付角色 |
 
 同名角色按优先级覆盖：用户级覆盖全局，全局覆盖内置。新增或修改角色定义后，需要该用户重新接入或重启 MetaAtoms 才会重新加载。
 
@@ -98,6 +98,11 @@ background:
 | `explore` | 只读探索代码结构、调用链、事实依据 | `ReadFile` / `Glob` / `Grep` |
 | `plan` | 整理需求、约束和执行计划，不直接实现 | `ReadFile` / `Glob` / `Grep` |
 | `general-purpose` | 通用子任务，工具视图更完整 | 仍受全局权限、沙箱、后台白名单和防嵌套规则约束 |
+| `product-manager` | 开发类需求分析、一次性澄清卡片、生成 `requirements.md` | `ReadFile` / `WriteFile` / `EditFile` / `Glob` / `Grep` |
+| `architect` | 根据需求生成 `architecture.md`，包含 Mermaid 架构图和时序图 | `ReadFile` / `WriteFile` / `EditFile` / `Glob` / `Grep` |
+| `tech-lead` | 根据需求和架构生成可断点续做的 `tasks.md` | `ReadFile` / `WriteFile` / `EditFile` / `Glob` / `Grep` |
+| `engineer` | 按 `tasks.md` 的单个任务独立编码实现 | 完整工具视图，仍受全局权限、沙箱和防嵌套规则约束 |
+| `tester` | 生成 `checklists.md`，并在执行阶段更新测试结果和 `test-report.md` | 完整工具视图，仍受全局权限、沙箱和防嵌套规则约束 |
 
 ### 与 tools / safety 的关系
 

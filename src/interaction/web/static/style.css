@@ -3818,6 +3818,328 @@ body {
     vertical-align: middle;
 }
 
+/* product-delivery 需求澄清弹窗 */
+.clarification-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 210;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.clarification-modal[hidden] { display: none; }
+
+.clarification-modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(10, 10, 11, 0.72);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+}
+
+.clarification-modal-inner {
+    position: relative;
+    z-index: 1;
+    width: min(860px, calc(100vw - 32px));
+    max-height: min(760px, calc(100vh - 48px));
+    background: var(--bg-elevated, #1a1a1c);
+    border: 1px solid var(--border, #2a2a2e);
+    border-radius: 8px;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.62);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.clarification-modal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 18px 14px;
+    border-bottom: 1px solid var(--border, #2a2a2e);
+}
+
+.clarification-modal-title-wrap {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.clarification-modal-title {
+    font-size: var(--fs-md, 15px);
+    font-weight: 650;
+    color: var(--fg, #e5e5e7);
+}
+
+.clarification-modal-summary {
+    font-size: var(--fs-xs, 12px);
+    color: var(--fg-muted, #8a8d93);
+    line-height: 1.45;
+}
+
+.clarification-modal-close {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+    background: transparent;
+    border: 0;
+    color: var(--fg-dim, #8a8a92);
+    cursor: pointer;
+    font-size: 20px;
+    line-height: 1;
+}
+
+.clarification-modal-close:hover { color: var(--fg, #e5e5e7); }
+
+.clarification-tabs {
+    display: flex;
+    gap: 0;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--border, #2a2a2e);
+    background: var(--bg, #0a0a0b);
+}
+
+.clarification-tab {
+    min-width: 150px;
+    max-width: 220px;
+    height: 44px;
+    padding: 0 14px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--fg-muted, #8a8d93);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-body, sans-serif);
+}
+
+.clarification-tab:hover {
+    color: var(--fg, #e5e5e7);
+    background: var(--bg-hover, #15151a);
+}
+
+.clarification-tab.is-active {
+    color: var(--accent, #c8a96a);
+    border-bottom-color: var(--accent, #c8a96a);
+}
+
+.clarification-tab-index {
+    width: 20px;
+    height: 20px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    flex: 0 0 20px;
+}
+
+.clarification-tab.is-complete .clarification-tab-index {
+    background: var(--success, #98c379);
+    border-color: var(--success, #98c379);
+    color: #08110b;
+}
+
+.clarification-tab-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--fs-xs, 12px);
+}
+
+.clarification-panel {
+    padding: 18px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.clarification-question-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.clarification-question-count,
+.clarification-required,
+.clarification-optional,
+.clarification-recommended {
+    font-size: 11px;
+    line-height: 1;
+    padding: 4px 7px;
+    border-radius: 999px;
+}
+
+.clarification-question-count {
+    color: var(--fg-muted, #8a8d93);
+    background: var(--bg, #0a0a0b);
+    border: 1px solid var(--border, #2a2a2e);
+}
+
+.clarification-required {
+    color: var(--warning, #e5c07b);
+    background: rgba(229, 192, 123, 0.12);
+}
+
+.clarification-optional {
+    color: var(--fg-muted, #8a8d93);
+    background: rgba(138, 141, 147, 0.12);
+}
+
+.clarification-question-title {
+    margin: 0 0 8px;
+    font-size: var(--fs-lg, 18px);
+    line-height: 1.35;
+    color: var(--fg, #e5e5e7);
+    letter-spacing: 0;
+}
+
+.clarification-question-text {
+    margin: 0 0 16px;
+    color: var(--fg-muted, #8a8d93);
+    font-size: var(--fs-sm, 13px);
+    line-height: 1.6;
+}
+
+.clarification-options {
+    display: grid;
+    gap: 10px;
+}
+
+.clarification-option {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr);
+    align-items: flex-start;
+    gap: 10px;
+    min-height: 58px;
+    padding: 12px;
+    border: 1px solid var(--border, #2a2a2e);
+    border-radius: 8px;
+    background: var(--bg, #0a0a0b);
+    cursor: pointer;
+}
+
+.clarification-option:hover {
+    border-color: var(--fg-faint, #3a3d43);
+    background: var(--bg-hover, #15151a);
+}
+
+.clarification-option.is-selected {
+    border-color: var(--accent, #c8a96a);
+    background: rgba(200, 169, 106, 0.08);
+}
+
+.clarification-option input[type="radio"] {
+    margin-top: 3px;
+    accent-color: var(--accent, #c8a96a);
+}
+
+.clarification-option-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.clarification-option-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--fg, #e5e5e7);
+    font-weight: 600;
+    font-size: var(--fs-sm, 13px);
+}
+
+.clarification-option-desc {
+    color: var(--fg-muted, #8a8d93);
+    font-size: var(--fs-xs, 12px);
+    line-height: 1.5;
+}
+
+.clarification-recommended {
+    color: #08110b;
+    background: var(--success, #98c379);
+    font-weight: 700;
+}
+
+.clarification-custom-input {
+    width: 100%;
+    height: 34px;
+    margin-top: 2px;
+    padding: 0 10px;
+    border: 1px solid var(--border, #2a2a2e);
+    border-radius: 6px;
+    background: var(--bg-elevated, #1a1a1c);
+    color: var(--fg, #e5e5e7);
+    font: inherit;
+    outline: none;
+}
+
+.clarification-custom-input:focus {
+    border-color: var(--accent, #c8a96a);
+    box-shadow: 0 0 0 2px rgba(200, 169, 106, 0.16);
+}
+
+.clarification-error {
+    margin: 0 18px 12px;
+    padding: 9px 11px;
+    border: 1px solid rgba(224, 108, 117, 0.35);
+    border-radius: 6px;
+    background: rgba(224, 108, 117, 0.12);
+    color: var(--error, #e06c75);
+    font-size: var(--fs-xs, 12px);
+}
+
+.clarification-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 14px 18px;
+    border-top: 1px solid var(--border, #2a2a2e);
+    background: var(--bg, #0a0a0b);
+}
+
+.clarification-nav-btn,
+.clarification-submit-btn {
+    height: 34px;
+    padding: 0 14px;
+    border-radius: 7px;
+    font-family: var(--font-body, sans-serif);
+    font-size: var(--fs-sm, 13px);
+    cursor: pointer;
+}
+
+.clarification-nav-btn {
+    border: 1px solid var(--border, #2a2a2e);
+    background: transparent;
+    color: var(--fg-muted, #8a8d93);
+}
+
+.clarification-submit-btn {
+    border: 1px solid var(--accent, #c8a96a);
+    background: var(--accent, #c8a96a);
+    color: #111;
+    font-weight: 650;
+}
+
+.clarification-nav-btn:hover:not(:disabled),
+.clarification-submit-btn:hover:not(:disabled) {
+    filter: brightness(1.06);
+}
+
+.clarification-nav-btn:disabled,
+.clarification-submit-btn:disabled {
+    opacity: 0.48;
+    cursor: not-allowed;
+}
+
 /* /skills 模态框:与 .sp-modal 同构（fixed 全屏 + backdrop + inner） */
 .skills-modal {
     position: fixed;
@@ -4058,6 +4380,28 @@ body {
 }
 
 @media (max-width: 620px) {
+    .clarification-modal-inner {
+        width: calc(100vw - 20px);
+        max-height: calc(100vh - 24px);
+    }
+    .clarification-modal-header,
+    .clarification-panel,
+    .clarification-actions {
+        padding-left: 14px;
+        padding-right: 14px;
+    }
+    .clarification-tab {
+        min-width: 128px;
+        max-width: 170px;
+        padding: 0 10px;
+    }
+    .clarification-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+    }
+    .clarification-submit-btn {
+        grid-column: 1 / -1;
+    }
     .project-panel-tab {
         padding: 8px var(--sp-2);
         font-size: var(--fs-xs);

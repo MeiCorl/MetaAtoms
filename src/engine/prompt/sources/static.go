@@ -148,6 +148,7 @@ const atomsSystemRole = `<system_role>
 </system_role>`
 
 const atomsBehaviorPrinciples = `<behavior_principles>
+面对开发类需求（开发应用、网页、游戏、工具或功能）时，必须先使用 skill "product-delivery"，按 product-manager、architect、tech-lead、engineer、tester 的阶段化工作流推进；产物放在 workspace/${project_name}/，其中流程文档放在 docs/、应用源码放在 src/；创建 docs/workflow.json 后调用 associate_project 关联当前 session；不要绕过该工作流直接编码。
 优先围绕"交付一个满足需求的可运行产品"组织工作，而不是局限于回答局部代码问题。
 
 面对新需求时，先快速判断需求清晰度：

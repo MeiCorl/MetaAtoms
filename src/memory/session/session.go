@@ -59,7 +59,8 @@ type Session struct {
 	// UpdatedAt 为会话最后更新时间
 	UpdatedAt time.Time `json:"updated_at"`
 	// Messages 为对话消息列表，使用 ContentBlock 数组形式
-	Messages []llm.Message `json:"messages"`
+	Messages          []llm.Message      `json:"messages"`
+	GeneratedProjects []GeneratedProject `json:"generated_projects,omitempty"`
 }
 
 // SessionManager 管理会话的持久化存储，作用域限定在单个 sessionsRoot 内。
@@ -82,16 +83,28 @@ type SessionSummary struct {
 	// MessageCount 为消息数量
 	MessageCount int `json:"message_count"`
 	// Preview 为首条用户消息的前 80 字符预览，无用户消息时显示 "(空会话)"
-	Preview string `json:"preview"`
+	Preview           string             `json:"preview"`
+	GeneratedProjects []GeneratedProject `json:"generated_projects,omitempty"`
+}
+
+// GeneratedProject describes a project directory associated with a session.
+type GeneratedProject struct {
+	Name         string    `json:"name"`
+	Path         string    `json:"path"`
+	WorkflowID   string    `json:"workflow_id,omitempty"`
+	WorkflowPath string    `json:"workflow_path,omitempty"`
+	CreatedAt    time.Time `json:"created_at,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 }
 
 // sessionMeta 为 {session_id}/meta.json 的结构。
 // 非导出类型，仅在本包内用于序列化/反序列化。
 type sessionMeta struct {
-	ID           string    `json:"id"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	MessageCount int       `json:"message_count"`
+	ID                string             `json:"id"`
+	CreatedAt         time.Time          `json:"created_at"`
+	UpdatedAt         time.Time          `json:"updated_at"`
+	MessageCount      int                `json:"message_count"`
+	GeneratedProjects []GeneratedProject `json:"generated_projects,omitempty"`
 }
 
 // NewSessionManager 创建会话管理器。
@@ -156,10 +169,11 @@ func (sm *SessionManager) CreateNew() *Session {
 func (sm *SessionManager) CreateSession(session *Session) error {
 	sessionDir := sm.sessionDirPath(session.ID)
 	if err := sm.writeSessionMeta(sessionDir, &sessionMeta{
-		ID:           session.ID,
-		CreatedAt:    session.CreatedAt,
-		UpdatedAt:    session.UpdatedAt,
-		MessageCount: 0,
+		ID:                session.ID,
+		CreatedAt:         session.CreatedAt,
+		UpdatedAt:         session.UpdatedAt,
+		MessageCount:      0,
+		GeneratedProjects: append([]GeneratedProject(nil), session.GeneratedProjects...),
 	}); err != nil {
 		return err
 	}
@@ -284,19 +298,22 @@ func (sm *SessionManager) Load(sessionID string) (*Session, error) {
 	meta, _, _ := sm.readSessionMeta(sessionID)
 	id := sessionID
 	var created, updated time.Time
+	var generatedProjects []GeneratedProject
 	if meta != nil {
 		if meta.ID != "" {
 			id = meta.ID
 		}
 		created = meta.CreatedAt
 		updated = meta.UpdatedAt
+		generatedProjects = append([]GeneratedProject(nil), meta.GeneratedProjects...)
 	}
 
 	return &Session{
-		ID:        id,
-		CreatedAt: created,
-		UpdatedAt: updated,
-		Messages:  messages,
+		ID:                id,
+		CreatedAt:         created,
+		UpdatedAt:         updated,
+		Messages:          messages,
+		GeneratedProjects: generatedProjects,
 	}, nil
 }
 
@@ -459,11 +476,12 @@ func (sm *SessionManager) parseSessionSummary(sessionID string) (*SessionSummary
 	messageCount, preview := sm.scanSummary(sm.messagesFilePath(sessionID))
 
 	return &SessionSummary{
-		ID:           meta.ID,
-		CreatedAt:    meta.CreatedAt,
-		UpdatedAt:    meta.UpdatedAt,
-		MessageCount: messageCount,
-		Preview:      preview,
+		ID:                meta.ID,
+		CreatedAt:         meta.CreatedAt,
+		UpdatedAt:         meta.UpdatedAt,
+		MessageCount:      messageCount,
+		Preview:           preview,
+		GeneratedProjects: append([]GeneratedProject(nil), meta.GeneratedProjects...),
 	}, nil
 }
 
@@ -516,6 +534,59 @@ func (sm *SessionManager) scanSummary(path string) (count int, preview string) {
 		}
 	}
 	return count, preview
+}
+
+// AssociateGeneratedProject upserts a generated project reference into session meta.
+func (sm *SessionManager) AssociateGeneratedProject(sessionID string, project GeneratedProject) error {
+	sessionID = strings.TrimSpace(sessionID)
+	project.Name = strings.TrimSpace(project.Name)
+	project.Path = strings.TrimSpace(project.Path)
+	project.WorkflowID = strings.TrimSpace(project.WorkflowID)
+	project.WorkflowPath = strings.TrimSpace(project.WorkflowPath)
+	if sessionID == "" {
+		return fmt.Errorf("session ID cannot be empty")
+	}
+	if project.Name == "" {
+		return fmt.Errorf("project name cannot be empty")
+	}
+	if project.Path == "" {
+		return fmt.Errorf("project path cannot be empty")
+	}
+
+	now := time.Now()
+	return sm.updateSessionMeta(sessionID, func(m *sessionMeta) {
+		if m.ID == "" {
+			m.ID = sessionID
+		}
+		if project.CreatedAt.IsZero() {
+			project.CreatedAt = now
+		}
+		project.UpdatedAt = now
+		for i := range m.GeneratedProjects {
+			existing := &m.GeneratedProjects[i]
+			if sameGeneratedProject(*existing, project) {
+				if existing.CreatedAt.IsZero() {
+					existing.CreatedAt = project.CreatedAt
+				}
+				existing.Name = project.Name
+				existing.Path = project.Path
+				existing.WorkflowID = project.WorkflowID
+				existing.WorkflowPath = project.WorkflowPath
+				existing.UpdatedAt = project.UpdatedAt
+				m.UpdatedAt = now
+				return
+			}
+		}
+		m.GeneratedProjects = append(m.GeneratedProjects, project)
+		m.UpdatedAt = now
+	})
+}
+
+func sameGeneratedProject(a, b GeneratedProject) bool {
+	if a.Path != "" && b.Path != "" && filepath.Clean(a.Path) == filepath.Clean(b.Path) {
+		return true
+	}
+	return strings.EqualFold(a.Name, b.Name)
 }
 
 // Delete 删除指定 ID 的会话目录（含 meta.json 与 messages.jsonl）。

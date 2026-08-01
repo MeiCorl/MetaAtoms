@@ -242,11 +242,13 @@ func NewHandler(
 		fileDiffStore:     fileDiffStore,
 	}
 	// 尝试恢复最近一个会话
+	restored := false
 	if latest, err := sessMgr.LoadLatest(); err == nil && latest != nil {
 		h.current = latest
 		h.conv.Reset(latest.Messages)
 		// 恢复的消息已在磁盘上，已落盘计数对齐到其长度
 		h.persistedMsgCount = len(latest.Messages)
+		restored = true
 		logger.Info("Handler 已恢复最近会话",
 			zap.String("session_id", latest.ID),
 			zap.Int("message_count", len(latest.Messages)),
@@ -263,8 +265,10 @@ func NewHandler(
 	h.conv.SetContextWindowSize(contextWindowSize)
 	if h.current != nil {
 		h.conv.SetSessionID(h.current.ID)
-		// 打开当前会话专属日志器：启动后核心链路日志即写入该会话目录的 metaatoms.log。
-		h.openSessionLogger(h.current.ID)
+		if restored {
+			// 只为已落盘历史会话打开 session logger。新空会话保持纯内存，避免刷新时创建空 session 目录。
+			h.openSessionLogger(h.current.ID)
+		}
 	}
 	return h
 }
@@ -348,6 +352,30 @@ func (h *Handler) CurrentSessionID() string {
 		return ""
 	}
 	return h.current.ID
+}
+
+// AssociateCurrentGeneratedProject records a generated project on the active session.
+func (h *Handler) AssociateCurrentGeneratedProject(project memsession.GeneratedProject) (string, error) {
+	h.mu.Lock()
+	if h.current == nil {
+		h.current = h.sessMgr.CreateNew()
+	}
+	sessionID := h.current.ID
+	h.mu.Unlock()
+
+	if err := h.sessMgr.AssociateGeneratedProject(sessionID, project); err != nil {
+		return "", err
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.current != nil && h.current.ID == sessionID {
+		if loaded, err := h.sessMgr.Load(sessionID); err == nil {
+			h.current.GeneratedProjects = loaded.GeneratedProjects
+			h.current.UpdatedAt = loaded.UpdatedAt
+		}
+	}
+	return sessionID, nil
 }
 
 // ForkSnapshot 返回统一 Agent 工具启动 fork 子 Agent 前需要的父会话快照。
@@ -828,6 +856,7 @@ func (h *Handler) saveCurrentSessionLocked() {
 	h.current.Messages = allMsgs
 	h.current.UpdatedAt = time.Now()
 	h.persistedMsgCount = len(allMsgs)
+	h.openSessionLogger(h.current.ID)
 }
 
 // saveCurrentSession 是 saveCurrentSessionLocked 的带锁包装，供未持有 h.mu 的调用点
@@ -873,8 +902,6 @@ func (h *Handler) handleGetCurrentSession(conn *websocket.Conn, msg Message) err
 		h.persistedMsgCount = 0
 		h.conv.SetSessionID(cur.ID)
 		h.mu.Unlock()
-		// 打开当前会话专属日志器（释放锁后再做，避免锁内做日志目录 IO）。
-		h.openSessionLogger(cur.ID)
 	}
 	if err := h.sendSessionLoaded(conn, cur); err != nil {
 		return err
@@ -905,11 +932,12 @@ func (h *Handler) handleListSessions(conn *websocket.Conn, msg Message) error {
 	out := make([]SessionSummary, len(summaries))
 	for i, s := range summaries {
 		out[i] = SessionSummary{
-			ID:           s.ID,
-			CreatedAt:    s.CreatedAt,
-			UpdatedAt:    s.UpdatedAt,
-			MessageCount: s.MessageCount,
-			Preview:      s.Preview,
+			ID:                s.ID,
+			CreatedAt:         s.CreatedAt,
+			UpdatedAt:         s.UpdatedAt,
+			MessageCount:      s.MessageCount,
+			Preview:           s.Preview,
+			GeneratedProjects: toWebGeneratedProjects(s.GeneratedProjects),
 		}
 	}
 	return h.sendMessage(conn, MsgTypeSessionList, SessionListPayload{Sessions: out})
@@ -929,8 +957,6 @@ func (h *Handler) handleNewSession(conn *websocket.Conn, msg Message) error {
 	if h.toolHandler != nil {
 		h.toolHandler.SetHookSessionID(newSessionID)
 	}
-	// 打开新会话专属日志器（切换点已持 h.mu；OpenSession 自身线程安全，不会死锁）。
-	h.openSessionLogger(newSessionID)
 	h.persistedMsgCount = 0
 	// 新会话触发 SP 重新组装（虽然 result 通常一致，但保持与切换路径一致的处理）
 	h.assembleSP()
@@ -1070,12 +1096,14 @@ func (h *Handler) handleDeleteSession(conn *websocket.Conn, msg Message) error {
 	h.mu.Lock()
 	currentChanged := h.current != nil && h.current.ID == p.ID
 	var newCurrent *memsession.Session
+	newCurrentLoaded := false
 	if currentChanged {
 		// 优先选最近更新的其它会话
 		summaries, listErr := h.sessMgr.ListSessions()
 		if listErr == nil && len(summaries) > 0 {
 			if loaded, loadErr := h.sessMgr.Load(summaries[0].ID); loadErr == nil {
 				newCurrent = loaded
+				newCurrentLoaded = true
 			}
 		}
 		// 兜底：没有任何历史会话或加载失败，新建一个空会话
@@ -1085,8 +1113,10 @@ func (h *Handler) handleDeleteSession(conn *websocket.Conn, msg Message) error {
 		h.current = newCurrent
 		h.conv.Reset(newCurrent.Messages)
 		h.conv.SetSessionID(newCurrent.ID)
-		// 切换后打开新当前会话专属日志器。
-		h.openSessionLogger(newCurrent.ID)
+		if newCurrentLoaded {
+			// 只为已落盘历史会话打开日志器；兜底新空会话不创建目录。
+			h.openSessionLogger(newCurrent.ID)
+		}
 		// 已落盘计数对齐到新当前会话的消息数（Load 出来的有计数，CreateNew 的为 0）
 		h.persistedMsgCount = len(newCurrent.Messages)
 		// 切换会话后重新组装 SP
@@ -2155,11 +2185,12 @@ func (h *Handler) sendSessionLoaded(conn *websocket.Conn, sess *memsession.Sessi
 		}
 	}
 	summary := SessionSummary{
-		ID:           sess.ID,
-		CreatedAt:    sess.CreatedAt,
-		UpdatedAt:    sess.UpdatedAt,
-		MessageCount: len(sess.Messages),
-		Preview:      firstUserPreview(sess.Messages),
+		ID:                sess.ID,
+		CreatedAt:         sess.CreatedAt,
+		UpdatedAt:         sess.UpdatedAt,
+		MessageCount:      len(sess.Messages),
+		Preview:           firstUserPreview(sess.Messages),
+		GeneratedProjects: toWebGeneratedProjects(sess.GeneratedProjects),
 	}
 	if err := h.sendMessage(conn, MsgTypeSessionLoaded, SessionLoadedPayload{
 		SessionID: sess.ID,
@@ -2173,6 +2204,24 @@ func (h *Handler) sendSessionLoaded(conn *websocket.Conn, sess *memsession.Sessi
 	// Step 8:同步推送 MCP 状态,让状态栏 MCP 区在会话加载后立刻有内容
 	_ = h.sendMCPStatus(conn)
 	return nil
+}
+
+func toWebGeneratedProjects(projects []memsession.GeneratedProject) []GeneratedProject {
+	if len(projects) == 0 {
+		return nil
+	}
+	out := make([]GeneratedProject, 0, len(projects))
+	for _, p := range projects {
+		out = append(out, GeneratedProject{
+			Name:         p.Name,
+			Path:         p.Path,
+			WorkflowID:   p.WorkflowID,
+			WorkflowPath: p.WorkflowPath,
+			CreatedAt:    p.CreatedAt,
+			UpdatedAt:    p.UpdatedAt,
+		})
+	}
+	return out
 }
 
 // buildChatMessages 把 llm.Message 列表转换为前端 ChatMessage 列表，

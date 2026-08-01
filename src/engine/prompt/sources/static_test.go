@@ -16,6 +16,19 @@ func TestStaticSource_Name(t *testing.T) {
 	}
 }
 
+func TestStaticSource_ProductDeliveryWorkflowMention(t *testing.T) {
+	s := NewStaticSource()
+	section, err := s.Assemble(context.Background(), Env{OS: "linux", CWD: "/tmp"})
+	if err != nil {
+		t.Fatalf("Assemble failed: %v", err)
+	}
+	for _, kw := range []string{"product-delivery", "product-manager", "architect", "tech-lead", "engineer", "tester", "associate_project", "workspace/${project_name}/", "docs/workflow.json", "应用源码放在 src/"} {
+		if !strings.Contains(section.Content, kw) {
+			t.Errorf("static prompt should mention %q for product-delivery workflow", kw)
+		}
+	}
+}
+
 // TestStaticSource_DefaultContent 验证默认产出包含 5 个 XML 风格子模块标签。
 func TestStaticSource_DefaultContent(t *testing.T) {
 	s := NewStaticSource()

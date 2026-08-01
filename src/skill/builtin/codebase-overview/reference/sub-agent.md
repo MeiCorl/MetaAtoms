@@ -9,7 +9,7 @@ SubAgent 是主 Agent 可调用的特殊工具能力。主 Agent 通过稳定的
 ## §2 核心模块
 
 - `src/subagent/definition`: 解析 Markdown + YAML frontmatter 角色定义，按 plugin -> builtin -> global -> user 顺序加载，用户级可覆盖低优先级同名定义，同级冲突为启动期错误。当前部分内部 source 名仍沿用 user/project 兼容枚举，tenant 装配会把 globalDir/userDir 映射到新语义。
-- `subagent/builtin`: 内置 `explore`、`plan`、`general-purpose` 三个角色，并通过 `embed.FS` 进入源码运行路径。
+- `subagent/builtin`: 内置 `explore`、`plan`、`general-purpose` 兜底角色，以及 `product-manager`、`architect`、`tech-lead`、`engineer`、`tester` 产品交付角色，并通过 `embed.FS` 进入源码运行路径。
 - `src/subagent/runtime`: 提供 `Runner.RunDefined` 与 `Runner.RunFork`。defined 从空白历史启动；fork 复制父历史、父 System Prompt 稳定块与父工具快照，并强制后台语义。
 - `src/subagent/background`: 进程内后台任务管理器，记录 queued/running/completed/failed/canceled 生命周期、结构化 prompt/output、最终文本、错误和 token 用量。
 - `src/subagent/tool`: 注册稳定工具对 `agent` / `task_status`。角色数量变化不会改变主 Agent 工具清单。
@@ -25,4 +25,4 @@ HookEngine 创建时也会收到同一份定义注册表与 Runner。`hook/execu
 
 ## §5 发布资源
 
-内置 Agent 定义同时通过 Go embed 和 dist 文件副本可用。构建脚本会把 `src/subagent/builtin/*.md` 复制到 `build/dist/subagent/builtin/`，与 `definition.DefaultLoadOptions` 的 `subagent/builtin` 路径对齐；源码运行即使没有 dist 副本也可通过 embed 加载三个内置角色。
+内置 Agent 定义同时通过 Go embed 和 dist 文件副本可用。构建脚本会把 `src/subagent/builtin/*.md` 复制到 `build/dist/subagent/builtin/`，与 `definition.DefaultLoadOptions` 的 `subagent/builtin` 路径对齐；源码运行即使没有 dist 副本也可通过 embed 加载全部内置角色。

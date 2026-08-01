@@ -816,6 +816,60 @@ func TestHandlerRecoversLatestSession(t *testing.T) {
 	}
 }
 
+func TestNewHandlerWithoutHistoryDoesNotCreateEmptySessionDir(t *testing.T) {
+	dir := t.TempDir()
+	sm, err := session.NewSessionManagerWithDir(dir, handlerTestWorkdir)
+	if err != nil {
+		t.Fatalf("SessionManager 初始化失败: %v", err)
+	}
+	t.Cleanup(logger.CloseAllSessions)
+
+	cfg := &config.Config{Provider: "anthropic", Model: "test", APIKey: "k", MaxTokens: 1024}
+	h := NewHandler(&mockProvider{}, sm, cfg, 10, nil, 100000, t.TempDir(), nil, nil, nil)
+
+	if h.CurrentSessionID() == "" {
+		t.Fatal("无历史时仍应创建内存中的当前 session ID")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("读取 sessions 目录失败: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("无历史构造 Handler 不应创建空 session 目录，实际 %d 个", len(entries))
+	}
+}
+
+func TestNewHandlerWithHistoryRestoresLatestWithoutExtraEmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	sm, err := session.NewSessionManagerWithDir(dir, handlerTestWorkdir)
+	if err != nil {
+		t.Fatalf("SessionManager 初始化失败: %v", err)
+	}
+	t.Cleanup(logger.CloseAllSessions)
+
+	sess := sm.CreateNew()
+	sess.Messages = []llm.Message{
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.NewTextBlock("latest history")}},
+	}
+	if err := persistSession(sm, sess); err != nil {
+		t.Fatalf("persistSession 失败: %v", err)
+	}
+
+	cfg := &config.Config{Provider: "anthropic", Model: "test", APIKey: "k", MaxTokens: 1024}
+	h := NewHandler(&mockProvider{}, sm, cfg, 10, nil, 100000, t.TempDir(), nil, nil, nil)
+
+	if h.CurrentSessionID() != sess.ID {
+		t.Fatalf("CurrentSessionID = %q，期望恢复 %q", h.CurrentSessionID(), sess.ID)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("读取 sessions 目录失败: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("有历史时刷新式构造不应额外创建空目录，实际 %d 个", len(entries))
+	}
+}
+
 // TestDeleteSessionRemovesFileAndNotifies 验证删除非当前会话：文件被移除、收到 session_deleted、不发生 currentChanged。
 func TestDeleteSessionRemovesFileAndNotifies(t *testing.T) {
 	dir := t.TempDir()
