@@ -13,7 +13,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-    <link rel="stylesheet" href="/style.css?v=20260802-codeblock-preview">
+    <link rel="stylesheet" href="/style.css?v=20260802-conversation-status">
     <link rel="stylesheet" href="/vendor/highlight-theme.css?v=20260731-atom-icon">
 
     <!-- 主题同步：默认亮色；HTML 解析期立即从 localStorage 读取并写到 <html data-theme="...">，
@@ -58,12 +58,12 @@
 
             <div class="topbar-spacer"></div>
 
-            <div class="topbar-status" aria-live="polite">
+            <div class="topbar-status" aria-live="polite" hidden>
                 <span id="agent-status-text">就绪</span>
                 <span id="agent-status-dot" class="status-dot" data-status="idle" aria-hidden="true"></span>
             </div>
 
-            <!-- 亮色 / 暗色 主题切换按钮：紧贴就绪状态右侧。
+            <!-- 亮色 / 暗色 主题切换按钮。
                  图标遵循「展示目标态」约定——默认亮色态下显示 🌙（点击切到暗色），
                  暗色态下显示 ☀️（点击切到亮色）。 -->
             <div id="user-menu" class="topbar-user" data-loaded="false">
@@ -155,6 +155,11 @@
                 </div>
             </div>
 
+            <div id="conversation-status" class="conversation-status" data-status="idle" hidden role="status" aria-live="polite">
+                <span id="conversation-status-dot" class="conversation-status-dot" data-status="idle" aria-hidden="true"></span>
+                <span id="conversation-status-text">思考中</span>
+            </div>
+
             <div class="inputbar" role="form" aria-label="消息输入">
                 <!-- 顶行：输入框 + 发送按钮。发送按钮保持在输入框右侧，位置不变。 -->
                 <div class="inputbar-main">
@@ -221,6 +226,11 @@
             <div class="project-panel-tabs" role="tablist" aria-label="用户文件侧栏视图">
                 <button id="project-tab-workspace-btn" class="project-panel-tab is-active" data-project-tab="workspace" type="button" role="tab" aria-selected="true" aria-controls="project-tab-files">Workspace</button>
                 <button id="project-tab-setting-btn" class="project-panel-tab" data-project-tab="setting" type="button" role="tab" aria-selected="false" aria-controls="project-tab-files">Setting</button>
+                <button id="project-panel-collapse-btn" class="project-panel-collapse" type="button" title="Collapse file panel" aria-label="Collapse file panel" aria-expanded="true">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="m9 18 6-6-6-6"/>
+                    </svg>
+                </button>
             </div>
 
             <section id="project-tab-files" class="project-panel-tabpanel is-active" data-project-tab-panel="browser" role="tabpanel" aria-labelledby="project-tab-workspace-btn">
@@ -453,6 +463,6 @@
     <script src="/vendor/highlight.min.js?v=20260731-atom-icon" defer></script>
     <!-- Step 1.4 接入 diff-match-patch：app.js 的 openFileDiffModal 通过全局 diff_match_patch 计算行级 diff -->
     <script src="/vendor/diff-match-patch.min.js?v=20260731-atom-icon" defer></script>
-    <script src="/app.js?v=20260802-setting-refresh" defer></script>
+    <script src="/app.js?v=20260802-conversation-status" defer></script>
 </body>
 </html>

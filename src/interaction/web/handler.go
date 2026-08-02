@@ -1357,7 +1357,7 @@ func (h *Handler) handleDeleteProjectEntry(conn *websocket.Conn, msg Message) er
 		return h.sendProjectEntryDeleted(conn, ProjectFilePayload{Found: false, OK: false, Reason: "invalid_payload"})
 	}
 	scope := normalizeProjectScope(p.Scope)
-	if scope != ProjectFileScopeSetting {
+	if scope != ProjectFileScopeSetting && !workspaceScopeAllowsDeletePath(scope, p.Path) {
 		return h.sendProjectEntryDeleted(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonWriteDenied, RequestID: p.RequestID})
 	}
 	if !settingScopeAllowsPath(scope, p.Path) {
@@ -1567,6 +1567,14 @@ func settingScopeProtectsDeletePath(scope, relPath string) bool {
 	default:
 		return false
 	}
+}
+
+func workspaceScopeAllowsDeletePath(scope, relPath string) bool {
+	if scope != ProjectFileScopeWorkspace {
+		return false
+	}
+	p := strings.Trim(strings.TrimSpace(filepath.ToSlash(relPath)), "/")
+	return p != "" && p != "." && !strings.Contains(p, "/")
 }
 
 func filterWorkspaceRootEntries(result *ProjectDirResult) {
@@ -2026,6 +2034,21 @@ func (h *Handler) BroadcastMCPStatus() {
 	payload := h.buildMCPStatusPayload()
 	for _, conn := range h.activeConnections() {
 		_ = h.sendMessage(conn, MsgTypeMCPStatus, payload)
+	}
+}
+
+// BroadcastProjectTreeUpdated tells active browsers to refresh their project
+// file panel after an out-of-band filesystem change.
+func (h *Handler) BroadcastProjectTreeUpdated(scopes []string) {
+	if len(scopes) == 0 {
+		return
+	}
+	payload := ProjectTreeUpdatedPayload{
+		Scopes:    append([]string(nil), scopes...),
+		UpdatedAt: time.Now(),
+	}
+	for _, conn := range h.activeConnections() {
+		_ = h.sendMessage(conn, MsgTypeProjectTreeUpdated, payload)
 	}
 }
 

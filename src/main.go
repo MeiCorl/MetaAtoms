@@ -460,12 +460,13 @@ func hasBuiltinSkillMDAt(dir string) bool {
 // run 是主流程入口；返回 error 表示启动或运行过程中发生不可恢复错误。
 // 拆出独立函数便于在测试中调用（虽然 step1.1 暂未引入 main 测试）。
 type tenantRuntime struct {
-	router      *web.Router
-	handler     *web.Handler
-	fingerprint string
-	cancel      context.CancelFunc
-	mcpPool     *session.Pool
-	closeOnce   sync.Once
+	router                  *web.Router
+	handler                 *web.Handler
+	fingerprint             string
+	projectTreeFingerprints map[string]string
+	cancel                  context.CancelFunc
+	mcpPool                 *session.Pool
+	closeOnce               sync.Once
 }
 
 type tenantManager struct {
@@ -528,6 +529,7 @@ func (m *tenantManager) RouterForUser(userID string) (*web.Router, func(*websock
 	}
 	router := web.NewDynamicRouter(func(conn *websocket.Conn, msg web.Message) (*web.Router, error) {
 		before := m.cachedFingerprint(userID)
+		beforeProjectTrees := m.cachedProjectTreeFingerprints(userID)
 		latest, err := m.runtimeForUser(userID)
 		if err != nil {
 			return nil, err
@@ -535,6 +537,14 @@ func (m *tenantManager) RouterForUser(userID string) (*web.Router, func(*websock
 		if before != "" && before != latest.fingerprint {
 			latest.handler.PushSlashCommandsUpdated(conn)
 			latest.handler.BroadcastMCPStatus()
+			if changedScopes, err := m.refreshProjectTreeFingerprints(userID, latest, beforeProjectTrees); err != nil {
+				logger.Warn("project tree refresh on websocket message failed",
+					zap.String("user_id", userID),
+					zap.Error(err),
+				)
+			} else if len(changedScopes) > 0 {
+				latest.handler.BroadcastProjectTreeUpdated(changedScopes)
+			}
 		}
 		return latest.router, nil
 	})
@@ -639,6 +649,7 @@ func (m *tenantManager) refreshCachedRuntimes() {
 	users := m.cachedRuntimeUsers()
 	for _, userID := range users {
 		before := m.cachedFingerprint(userID)
+		beforeProjectTrees := m.cachedProjectTreeFingerprints(userID)
 		rt, err := m.runtimeForUser(userID)
 		if err != nil {
 			logger.Warn("tenant runtime auto refresh failed",
@@ -650,6 +661,19 @@ func (m *tenantManager) refreshCachedRuntimes() {
 		if before != "" && rt != nil && rt.fingerprint != before {
 			m.pushSlashCommandsUpdated(userID, rt)
 			rt.handler.BroadcastMCPStatus()
+		}
+		if rt != nil {
+			changedScopes, err := m.refreshProjectTreeFingerprints(userID, rt, beforeProjectTrees)
+			if err != nil {
+				logger.Warn("project tree auto refresh fingerprint failed",
+					zap.String("user_id", userID),
+					zap.Error(err),
+				)
+				continue
+			}
+			if len(changedScopes) > 0 {
+				rt.handler.BroadcastProjectTreeUpdated(changedScopes)
+			}
 		}
 	}
 }
@@ -740,6 +764,43 @@ func (m *tenantManager) cachedFingerprint(userID string) string {
 	return ""
 }
 
+func (m *tenantManager) cachedProjectTreeFingerprints(userID string) map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rt := m.items[userID]; rt != nil && len(rt.projectTreeFingerprints) > 0 {
+		out := make(map[string]string, len(rt.projectTreeFingerprints))
+		for scope, fp := range rt.projectTreeFingerprints {
+			out[scope] = fp
+		}
+		return out
+	}
+	return nil
+}
+
+func (m *tenantManager) refreshProjectTreeFingerprints(userID string, rt *tenantRuntime, before map[string]string) ([]string, error) {
+	if rt == nil {
+		return nil, nil
+	}
+	userDir := auth.UserDir(m.baseDir, userID)
+	latest, err := projectTreeFingerprintsForUser(userDir)
+	if err != nil {
+		return nil, err
+	}
+	scopes := []string{web.ProjectFileScopeWorkspace, web.ProjectFileScopeSetting}
+	changed := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		if before[scope] != "" && latest[scope] != before[scope] {
+			changed = append(changed, scope)
+		}
+	}
+	m.mu.Lock()
+	if current := m.items[userID]; current != nil {
+		current.projectTreeFingerprints = latest
+	}
+	m.mu.Unlock()
+	return changed, nil
+}
+
 func (m *tenantManager) fingerprintForUser(userID string) (string, error) {
 	userDir := auth.UserDir(m.baseDir, userID)
 	return fingerprintPaths([]string{
@@ -816,6 +877,89 @@ func fingerprintFile(w io.Writer, root, path string, info os.FileInfo) error {
 	}
 	_, _ = io.WriteString(w, "\n")
 	return nil
+}
+
+func projectTreeFingerprintsForUser(userDir string) (map[string]string, error) {
+	settingFP, err := fingerprintPathsMetadata([]string{
+		filepath.Join(userDir, "setting.json"),
+		filepath.Join(userDir, "skills"),
+		filepath.Join(userDir, "agents"),
+		filepath.Join(userDir, "memory"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	workspaceFP, err := fingerprintPathsMetadata([]string{
+		filepath.Join(userDir, "workspace"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		web.ProjectFileScopeWorkspace: workspaceFP,
+		web.ProjectFileScopeSetting:   settingFP,
+	}, nil
+}
+
+func fingerprintPathsMetadata(paths []string) (string, error) {
+	h := sha256.New()
+	for _, path := range paths {
+		if err := fingerprintPathMetadata(h, path); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func fingerprintPathMetadata(w io.Writer, path string) error {
+	clean := filepath.Clean(path)
+	info, err := os.Stat(clean)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			_, _ = fmt.Fprintf(w, "missing:%s\n", filepath.ToSlash(clean))
+			return nil
+		}
+		return fmt.Errorf("fingerprint stat %s: %w", clean, err)
+	}
+	if !info.IsDir() {
+		fingerprintFileMetadata(w, clean, clean, info)
+		return nil
+	}
+	return filepath.WalkDir(clean, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("fingerprint walk %s: %w", path, walkErr)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("fingerprint info %s: %w", path, err)
+		}
+		if info.IsDir() {
+			rel, _ := filepath.Rel(clean, path)
+			_, _ = fmt.Fprintf(w, "dir:%s:%d\n",
+				filepath.ToSlash(filepath.Join(clean, rel)),
+				info.ModTime().UnixNano(),
+			)
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			_, _ = fmt.Fprintf(w, "skip:%s:%s:%d\n", filepath.ToSlash(path), info.Mode().String(), info.ModTime().UnixNano())
+			return nil
+		}
+		fingerprintFileMetadata(w, clean, path, info)
+		return nil
+	})
+}
+
+func fingerprintFileMetadata(w io.Writer, root, path string, info os.FileInfo) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		rel = path
+	}
+	_, _ = fmt.Fprintf(w, "file:%s:%d:%d\n",
+		filepath.ToSlash(filepath.Join(root, rel)),
+		info.Size(),
+		info.ModTime().UnixNano(),
+	)
 }
 
 func buildTenantSkillRootBySource(userDir, globalDir, execDir string) map[skill.Source]string {
@@ -1081,8 +1225,22 @@ func (m *tenantManager) buildRuntime(userID, fingerprint string) (*tenantRuntime
 
 	router := web.NewRouter()
 	handler.Register(router)
+	projectTreeFingerprints, fpErr := projectTreeFingerprintsForUser(userDir)
+	if fpErr != nil {
+		logger.Warn("project tree initial fingerprint failed",
+			zap.String("user_id", userID),
+			zap.Error(fpErr),
+		)
+	}
 	logger.Info("tenant runtime ready", zap.String("user_id", userID), zap.String("user_dir", userDir))
-	return &tenantRuntime{router: router, handler: handler, fingerprint: fingerprint, cancel: runtimeCancel, mcpPool: mcpPool}, nil
+	return &tenantRuntime{
+		router:                  router,
+		handler:                 handler,
+		fingerprint:             fingerprint,
+		projectTreeFingerprints: projectTreeFingerprints,
+		cancel:                  runtimeCancel,
+		mcpPool:                 mcpPool,
+	}, nil
 }
 
 func ensureTenantDirs(userDir string) error {

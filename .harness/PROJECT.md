@@ -1,8 +1,8 @@
 # 背景
 
-我们正在实现一款类似 Atoms（https://atoms.dev/）的云端多租户 AI Agent。Atoms 的定位是用一支多智能体 AI 团队，帮助用户从想法出发，完成市场研究、产品定义、全栈开发、部署上线、SEO/广告增长和数据分析；Atoms 官网也把它描述为“把想法变成可销售的产品”的 AI 开发平台，并强调无需编码。作为一个非商业化的个人项目，MetaAtoms 不用完全复制 Atoms，实现方式也不一定要完全参考 Atoms，只需要实现核心功能：根据用户想法交付一个可运行的应用源码，并且具有良好的交互体验。在支持基本功能的前提下，也可以提供一些和 Atoms 差异化的功能思考和实现，比如支持用户自定义配置 MCP、Skill、Agent，以及针对用户的长期学习记忆能力等。
+我们正在实现一款类似 Atoms（[https://atoms.dev/）的云端多租户](https://atoms.dev/）的云端多租户) AI Agent。Atoms 的定位是用一支多智能体 AI 团队，帮助用户从想法出发，完成市场研究、产品定义、全栈开发、部署上线、SEO/广告增长和数据分析；Atoms 官网也把它描述为“把想法变成可销售的产品”的 AI 开发平台，并强调无需编码。作为一个非商业化的个人项目，MetaAtoms 不用完全复制 Atoms，实现方式也不一定要完全参考 Atoms，只需要实现核心功能：根据用户想法交付一个可运行的应用源码，并且具有良好的交互体验。在支持基本功能的前提下，也可以提供一些和 Atoms 差异化的功能思考和实现，比如支持用户自定义配置 MCP、Skill、Agent，以及针对用户的长期学习记忆能力等。
 
-本质上 MetaAtoms 也是一个 AI Coding Agent，需要具备 Agent 的基本能力，比如循环推理、调用工具、反馈、会话管理、上下文管理等机制。这部分计划直接从之前的 CodePilot（https://github.com/MeiCorl/CodePilot）迁移过来。但与 CodePilot 个人终端 AI 编程助手的定位不同，MetaAtoms 是一款面向多租户的云端 AI 编程助手，因此很多功能迁移后需要作适当修改。比如需要 UI 重构、登录验证、会话支持多租户、数据（包括配置数据、会话数据、记忆数据等）需要按租户隔离、权限系统需要支持多租户并确保用户不能看到其他用户的数据、Agent 行为模式调整等。
+本质上 MetaAtoms 也是一个 AI Coding Agent，需要具备 Agent 的基本能力，比如循环推理、调用工具、反馈、会话管理、上下文管理等机制。这部分计划直接从之前的 CodePilot（[https://github.com/MeiCorl/CodePilot）迁移过来。但与](https://github.com/MeiCorl/CodePilot）迁移过来。但与) CodePilot 个人终端 AI 编程助手的定位不同，MetaAtoms 是一款面向多租户的云端 AI 编程助手，因此很多功能迁移后需要作适当修改。比如需要 UI 重构、登录验证、会话支持多租户、数据（包括配置数据、会话数据、记忆数据等）需要按租户隔离、权限系统需要支持多租户并确保用户不能看到其他用户的数据、Agent 行为模式调整等。
 
 # 项目架构
 
@@ -10,13 +10,17 @@ MetaAtoms 的底层思路参考 CodePilot：保留「LLM Provider -> Conversatio
 
 整体采用「5 层垂直分层 + 安全横切」架构，`src/main.go` 作为组合根负责装配各层依赖：
 
-| 层级 | 代码区域 | 核心职责 | 主要组件 |
-| --- | --- | --- | --- |
-| 第 1 层：交互层 | `src/interaction/web/` | 用户入口、HTTP/WS 通信、页面渲染、流式消息、权限确认、工具结果展示 | Web Server、Router、Handler、WebSocket、静态资源、diff 展示、会话侧边栏 |
-| 第 2 层：引擎层 | `src/engine/`、`src/llm/` | ReAct 循环、LLM 适配、Prompt 构建、会话历史编排、Agent 运行控制 | ConversationManager、AgentLoop、ToolHandler、Prompt Builder、Anthropic/OpenAI Provider |
-| 第 3 层：工具层 | `src/tool/`、`src/skill/`、`src/mcp/`、`src/command/`、`src/hook/`、`src/subagent/` | 把内置工具、Skill、MCP、Slash、Hook、SubAgent 统一抽象为可注册、可审计、可权限控制的 Agent 能力 | Tool Registry、内置工具、use_skill、MCP Adapter、Slash Registry、HookEngine、agent/task_status 工具 |
-| 第 4 层：记忆与数据层 | `src/memory/`、会话持久化相关包 | 会话状态、上下文窗口、压缩摘要、长期记忆、用户级数据持久化 | Session Store、Context Compactor、Tool Result Store、AutoLearn Store、MEMORY.md 索引 |
-| 第 5 层：安全层 | `src/auth/`、`src/security/` | 登录认证、权限决策、HITL、人类确认、路径沙箱、黑名单、多租户边界保护 | Auth、Checker、Interceptor、SandboxMiddleware、Path Policy、Blacklist |
+
+| 层级           | 代码区域                                                                           | 核心职责                                                             | 主要组件                                                                                    |
+| ------------ | ------------------------------------------------------------------------------ | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| 第 1 层：交互层    | `src/interaction/web/`                                                         | 用户入口、HTTP/WS 通信、页面渲染、流式消息、权限确认、工具结果展示                            | Web Server、Router、Handler、WebSocket、静态资源、diff 展示、会话侧边栏                                  |
+| 第 2 层：引擎层    | `src/engine/`、`src/llm/`                                                       | ReAct 循环、LLM 适配、Prompt 构建、会话历史编排、Agent 运行控制                      | ConversationManager、AgentLoop、ToolHandler、Prompt Builder、Anthropic/OpenAI Provider      |
+| 第 3 层：工具层    | `src/tool/`、`src/skill/`、`src/mcp/`、`src/command/`、`src/hook/`、`src/subagent/` | 把内置工具、Skill、MCP、Slash、Hook、SubAgent 统一抽象为可注册、可审计、可权限控制的 Agent 能力 | Tool Registry、内置工具、use_skill、MCP Adapter、Slash Registry、HookEngine、agent/task_status 工具 |
+| 第 4 层：记忆与数据层 | `src/memory/`、会话持久化相关包                                                         | 会话状态、上下文窗口、压缩摘要、长期记忆、用户级数据持久化                                    | Session Store、Context Compactor、Tool Result Store、AutoLearn Store、MEMORY.md 索引          |
+| 第 5 层：安全层    | `src/auth/`、`src/security/`                                                    | 登录认证、权限决策、HITL、人类确认、路径沙箱、黑名单、多租户边界保护                             | Auth、Checker、Interceptor、SandboxMiddleware、Path Policy、Blacklist                        |
+
+
+
 
 ## 核心运行模型
 
@@ -46,6 +50,8 @@ Browser/WebUI
 - 资源加载：Skill/Agent/Memory 支持 builtin、global、user 多来源加载；用户级资源优先级最高，写入只落到用户目录。
 - 数据隔离：配置数据、会话数据、记忆数据、工具写入路径都按用户目录隔离；跨用户读取和写入由路径沙箱兜底阻断。
 
+
+
 ## 关键模块关系
 
 - `src/main.go`：组合根。负责加载配置、创建 Provider、注册工具、装配权限/沙箱、加载 Skill/MCP/Agent、启动 Web Server。
@@ -61,6 +67,8 @@ Browser/WebUI
 - `src/hook/`：生命周期扩展。把工具、会话、压缩、Prompt、Agent Loop 等事件开放给 command/http/prompt/agent action。
 - `src/subagent/`：多 Agent 协作能力。通过统一 `agent` 工具调度 defined/fork 子 Agent，并支持后台任务状态查询。
 
+
+
 ## 架构约束
 
 - 上层可以通过接口调用下层能力，业务包之间避免直接依赖对方内部实现；跨模块装配优先放在 `src/main.go`。
@@ -70,7 +78,11 @@ Browser/WebUI
 - 权限策略可配置，但路径沙箱是硬边界；任何文件读写/命令执行都不能绕过安全层。
 - 长文档和系统自感知信息采用「短 Prompt 指引 + Skill/reference 按需加载」，避免常驻占用上下文窗口。
 
+
+
 # 项目实现进度
+
+
 
 ## 已完成 / 进行中
 
@@ -91,8 +103,10 @@ Browser/WebUI
 - [x] Hook 系统：支持多类生命周期事件、条件匹配和 command/http/prompt/agent action。
 - [x] SubAgent 基础能力：完成 agent/task_status 工具、内置角色、defined/fork 运行、后台任务和 WebUI 状态回传。
 
+
+
 ## 后续优化
 
-- [ ] WebUI 体验增强：完善项目文件浏览、任务看板、权限确认体验、移动端适配和长任务状态管理。
-- [ ] Agent 行为流程定制：面向“从想法到可运行应用”的任务阶段，沉淀需求澄清、方案设计、开发、测试、部署、增长分析等可配置流程。
+- [x] WebUI 体验增强：完善项目文件浏览、任务看板、权限确认体验、移动端适配和长任务状态管理。
+- [x] Agent 行为流程定制：面向“从想法到可运行应用”的任务阶段，沉淀需求澄清、方案设计、开发、测试、部署、增长分析等可配置流程。
 - [ ] 测试与发布工程：补齐端到端测试、关键安全回归测试、构建产物校验和部署文档。

@@ -98,6 +98,9 @@ const (
 	MsgTypeProjectGitDiff = "project_git_diff"
 	// MsgTypeProjectSearch responds to search_project.
 	MsgTypeProjectSearch = "project_search"
+	// MsgTypeProjectTreeUpdated is pushed when the server detects external
+	// changes in the workspace or setting browser scopes.
+	MsgTypeProjectTreeUpdated = "project_tree_updated"
 	// MsgTypeMCPStatus 由后端推送 MCP server 健康状态，前端在状态栏渲染。
 	// 连接成功时立刻推送一次，运行期由 mcp 后端按需推送更新。
 	MsgTypeMCPStatus = "mcp_status"
@@ -557,6 +560,13 @@ type ProjectSearchPayload struct {
 	TruncatedBy  string                    `json:"truncated_by,omitempty"`
 	Limits       ProjectSearchLimits       `json:"limits"`
 	RequestID    string                    `json:"request_id,omitempty"`
+}
+
+// ProjectTreeUpdatedPayload notifies the UI that one or more project browser
+// scopes changed outside the current page.
+type ProjectTreeUpdatedPayload struct {
+	Scopes    []string  `json:"scopes"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // AgentIterationPayload Agent Loop 迭代进度事件。

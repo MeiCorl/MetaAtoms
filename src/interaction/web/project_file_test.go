@@ -90,6 +90,33 @@ func TestFilterSettingRootEntriesAddsSettingJSONPlaceholder(t *testing.T) {
 	}
 }
 
+func TestWorkspaceScopeAllowsDeletePathOnlyRootProjects(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "root project", path: "breakout-game", want: true},
+		{name: "trimmed root project", path: "/breakout-game/", want: true},
+		{name: "empty", path: "", want: false},
+		{name: "dot", path: ".", want: false},
+		{name: "nested", path: "breakout-game/docs", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := workspaceScopeAllowsDeletePath(ProjectFileScopeWorkspace, tt.path)
+			if got != tt.want {
+				t.Fatalf("workspaceScopeAllowsDeletePath(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+
+	if workspaceScopeAllowsDeletePath(ProjectFileScopeSetting, "breakout-game") {
+		t.Fatal("setting scope should not use workspace delete allowance")
+	}
+}
+
 func TestProjectFileBrowserCreateEntryRejectsEscapes(t *testing.T) {
 	root := t.TempDir()
 	browser := NewProjectFileBrowser(root)

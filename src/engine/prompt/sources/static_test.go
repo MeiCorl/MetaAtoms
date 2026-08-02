@@ -22,7 +22,7 @@ func TestStaticSource_ProductDeliveryWorkflowMention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble failed: %v", err)
 	}
-	for _, kw := range []string{"product-delivery", "一体化全栈工程师", "需求分析", "架构设计", "编码实现", "基础自检", "SubAgent 定义保留", "不调用 Agent/task_status", "associate_project", "不要传 project_path", "不要在调用前写文件", "project.name/path/workflow_path", "workspace/${project_name}/", "应用源码放在 src/"} {
+	for _, kw := range []string{"product-delivery", "一体化全栈工程师", "需求分析", "架构设计", "编码实现", "基础自检", "SubAgent 定义保留", "不调用 Agent/task_status", "associate_project", "不要传 project_path", "不要在调用前写文件", "project.name/path/workflow_path", "workspace/${project_name}/", "应用源码放在 src/", "相对用户工作区的项目路径", "不要输出云端绝对路径", "右侧工作区查看"} {
 		if !strings.Contains(section.Content, kw) {
 			t.Errorf("static prompt should mention %q for product-delivery workflow", kw)
 		}
@@ -121,6 +121,19 @@ func TestStaticSource_ToolUsageMentionsReadFile(t *testing.T) {
 	}
 	if !strings.Contains(section.Content, "Bash") {
 		t.Errorf("工具使用原则应提到 Bash（用于警告用 Bash+cat 替代 ReadFile）")
+	}
+}
+
+func TestStaticSource_ToolUsageMentionsPowerShellOnWindows(t *testing.T) {
+	s := NewStaticSource()
+	section, err := s.Assemble(context.Background(), Env{OS: "windows", CWD: "E:\\Atoms"})
+	if err != nil {
+		t.Fatalf("Assemble 失败: %v", err)
+	}
+	for _, kw := range []string{"Windows", "Bash 命令", "PowerShell 语法", "POSIX shell 语法"} {
+		if !strings.Contains(section.Content, kw) {
+			t.Errorf("Windows 环境下的工具使用规则应包含 %q", kw)
+		}
 	}
 }
 

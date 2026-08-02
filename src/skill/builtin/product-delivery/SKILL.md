@@ -173,6 +173,8 @@ product-delivery 根据 `requirements.md` 和 `architecture.md` 直接完成代�
 
 将 `workflow.json.status` 更新为 `completed`，无需额外交付文档。直接回复用户：生成已完成、生成项目路径、目录结构、运行方式、基础自检摘要、已知风险。
 
+交付回复中的项目路径必须使用相对用户工作区的路径，例如 `workspace/${project_name}`，不要输出完整云端绝对路径（例如 `~/.metaatoms/...`、`C:\Users\...\workspace\...` 或 `/home/.../workspace/...`）。同时提示用户可以在右侧工作区查看和打开生成的项目文件。
+
 ## 异常处理
 
 - 需求仍不清晰：一次性输出澄清卡片，等待用户回答。

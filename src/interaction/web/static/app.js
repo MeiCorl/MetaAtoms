@@ -24,6 +24,9 @@
         sessionTitle:   $('current-session-title'),
         sessionMeta:    $('current-session-meta'),
         messages:       $('messages'),
+        conversationStatus:     $('conversation-status'),
+        conversationStatusText: $('conversation-status-text'),
+        conversationStatusDot:  $('conversation-status-dot'),
         input:          $('input'),
         charCount:      $('char-count'),
         modelName:      $('model-name'),
@@ -75,6 +78,7 @@
         // Step 1.5 Task 4：右侧用户文件栏 DOM 引用
         projectPanel:        $('project-file-panel'),
         projectPanelTabs:    document.querySelector('.project-panel-tabs'),
+        projectCollapseBtn:  $('project-panel-collapse-btn'),
         projectPanelTitle:   $('project-panel-title'),
         projectNewFileBtn:   $('project-new-file-btn'),
         projectNewFolderBtn: $('project-new-folder-btn'),
@@ -203,6 +207,7 @@
         projectSearchPending: null,
         projectSearchSeq: 0,
         projectPanelBound: false,
+        projectPanelCollapsed: false,
         clarification: {
             sourceKey: '',
             workflowId: '',
@@ -506,6 +511,7 @@
         ProjectGitDiff:    'project_git_diff',
         SearchProject:     'search_project',
         ProjectSearch:     'project_search',
+        ProjectTreeUpdated:'project_tree_updated',
         // Step 8：MCP server 健康状态推送
         MCPStatus:        'mcp_status',
         // Step 7：上下文压缩（手动触发 + 事件推送）
@@ -605,6 +611,7 @@
             case MsgType.ProjectGitChanges: return onProjectGitChanges(msg.payload);
             case MsgType.ProjectGitDiff:    return onProjectGitDiff(msg.payload);
             case MsgType.ProjectSearch:     return onProjectSearch(msg.payload);
+            case MsgType.ProjectTreeUpdated:return onProjectTreeUpdated(msg.payload);
             case MsgType.MCPStatus:         return onMCPStatus(msg.payload);
             case MsgType.CompactionEvent:   return onCompactionEvent(msg.payload);
             case MsgType.MemoryReviewEvent: return onMemoryReviewEvent(msg.payload);
@@ -626,6 +633,7 @@
     function onStreamChunk(p) {
         if (!p || !p.delta) return;
         state.streaming = true;
+        renderConversationStatus();
         // 首个 chunk 到达：移除占位的 thinking 节点
         if (state.expectingAssistant) {
             state.expectingAssistant = false;
@@ -834,6 +842,41 @@
         return state.projectActiveTab === 'setting' ? 'setting' : 'workspace';
     }
 
+    function currentProjectPathForScope(scope) {
+        const normalizedScope = scope === 'setting' ? 'setting' : 'workspace';
+        const cached = normalizeProjectPath(state.projectDirPathByScope[normalizedScope] || '');
+        if (cached) return cached;
+        if (state.projectScope === normalizedScope) {
+            return normalizeProjectPath(state.projectDirPath || '');
+        }
+        return '';
+    }
+
+    function loadProjectPanelCollapsed() {
+        try {
+            return localStorage.getItem('metaatoms-project-panel-collapsed') === 'true';
+        } catch {
+            return false;
+        }
+    }
+
+    function setProjectPanelCollapsed(collapsed, options = {}) {
+        const next = !!collapsed;
+        state.projectPanelCollapsed = next;
+        if (dom.app) dom.app.classList.toggle('is-project-panel-collapsed', next);
+        if (dom.projectPanel) dom.projectPanel.classList.toggle('is-collapsed', next);
+        if (dom.projectCollapseBtn) {
+            dom.projectCollapseBtn.setAttribute('aria-expanded', next ? 'false' : 'true');
+            dom.projectCollapseBtn.title = next ? 'Expand file panel' : 'Collapse file panel';
+            dom.projectCollapseBtn.setAttribute('aria-label', dom.projectCollapseBtn.title);
+        }
+        if (options.persist !== false) {
+            try {
+                localStorage.setItem('metaatoms-project-panel-collapsed', next ? 'true' : 'false');
+            } catch { /* ignore storage failures */ }
+        }
+    }
+
     function setProjectChrome(scope) {
         const isSetting = scope === 'setting';
         if (dom.projectPanelTitle) dom.projectPanelTitle.textContent = isSetting ? 'Setting' : 'Workspace';
@@ -912,6 +955,27 @@
         renderProjectFileList(entries, normalizeProjectPath(p.parent_path));
         if (dom.projectEmpty) dom.projectEmpty.hidden = entries.length !== 0;
         if (dom.projectError) dom.projectError.hidden = true;
+    }
+
+    function onProjectTreeUpdated(p) {
+        const scopes = new Set((Array.isArray(p?.scopes) ? p.scopes : []).map(s => String(s || '').toLowerCase()));
+        if (scopes.size === 0) return;
+
+        const activeScope = currentProjectScope();
+        if (scopes.has(activeScope)) {
+            requestProjectDir(currentProjectPathForScope(activeScope), { scope: activeScope, force: true });
+        }
+
+        const previewScope = state.projectWorkspacePreviewScope || '';
+        const previewPath = normalizeProjectPath(state.projectWorkspacePreviewPath || '');
+        const editingSettingPreview = previewScope === 'setting' && state.projectWorkspacePreviewEditing;
+        if (previewPath && scopes.has(previewScope) && !editingSettingPreview) {
+            openProjectWorkspaceFile(previewPath);
+        }
+
+        if (state.projectGitLoaded && scopes.has('workspace')) {
+            requestProjectGitChanges({ force: true });
+        }
     }
 
     function onProjectFile(p) {
@@ -1076,6 +1140,64 @@
         return btn;
     }
 
+    function workspaceDownloadURL(path) {
+        return `/api/workspace/download?path=${encodeURIComponent(path)}`;
+    }
+
+    function filenameFromContentDisposition(header) {
+        if (!header) return '';
+        const starMatch = header.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+        if (starMatch) {
+            try {
+                return decodeURIComponent(starMatch[1].trim().replace(/^"|"$/g, ''));
+            } catch {
+                return starMatch[1].trim().replace(/^"|"$/g, '');
+            }
+        }
+        const match = header.match(/filename\s*=\s*("[^"]+"|[^;]+)/i);
+        return match ? match[1].trim().replace(/^"|"$/g, '') : '';
+    }
+
+    function workspaceDownloadFilename(path, response) {
+        const headerName = filenameFromContentDisposition(response?.headers?.get('Content-Disposition'));
+        if (headerName) return headerName;
+        const fallback = normalizeProjectPath(path).split('/').filter(Boolean).pop() || 'workspace';
+        return fallback.endsWith('.zip') ? fallback : `${fallback}.zip`;
+    }
+
+    async function downloadWorkspaceProject(path, action) {
+        const normalized = normalizeProjectPath(path);
+        if (!normalized || action?.classList.contains('is-loading')) return;
+        if (action) {
+            action.classList.add('is-loading');
+            action.setAttribute('aria-busy', 'true');
+        }
+        try {
+            const response = await fetch(workspaceDownloadURL(normalized), { credentials: 'same-origin' });
+            if (!response.ok) {
+                throw new Error(`download failed: ${response.status}`);
+            }
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = workspaceDownloadFilename(normalized, response);
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            console.warn('workspace download failed', err);
+            showCompactionToast('Project download failed. Try again.', 'error');
+        } finally {
+            if (action) {
+                action.classList.remove('is-loading');
+                action.removeAttribute('aria-busy');
+            }
+        }
+    }
+
     function buildWorkspaceDownloadButton(path) {
         const action = document.createElement('span');
         action.className = 'project-file-download';
@@ -1087,8 +1209,7 @@
         const download = (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
-            if (!path) return;
-            window.location.href = `/api/workspace/download?path=${encodeURIComponent(path)}`;
+            downloadWorkspaceProject(path, action);
         };
         action.addEventListener('click', download);
         action.addEventListener('keydown', (ev) => {
@@ -1107,7 +1228,12 @@
         return state.projectScope === 'setting' && !!path && !isProtectedSettingEntry(path);
     }
 
-    function buildSettingDeleteButton(entry) {
+    function canDeleteWorkspaceProject(entry) {
+        const path = normalizeProjectPath(entry?.path);
+        return state.projectScope === 'workspace' && !state.projectDirPath && entry?.type === 'directory' && !!path && !path.includes('/');
+    }
+
+    function buildProjectDeleteButton(entry, scope) {
         const isDir = entry?.type === 'directory';
         const path = normalizeProjectPath(entry?.path);
         const action = document.createElement('span');
@@ -1120,7 +1246,7 @@
         const remove = (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
-            deleteProjectSettingEntry(path, isDir ? 'directory' : 'file');
+            deleteProjectEntry(path, isDir ? 'directory' : 'file', scope);
         };
         action.addEventListener('click', remove);
         action.addEventListener('keydown', (ev) => {
@@ -1167,10 +1293,16 @@
         main.appendChild(name);
         main.appendChild(meta);
         btn.appendChild(main);
-        if (state.projectScope === 'workspace' && !state.projectDirPath && isDir) {
-            btn.appendChild(buildWorkspaceDownloadButton(path));
+        const actions = document.createElement('span');
+        actions.className = 'project-file-actions';
+        if (canDeleteWorkspaceProject(entry)) {
+            actions.appendChild(buildProjectDeleteButton(entry, 'workspace'));
+            actions.appendChild(buildWorkspaceDownloadButton(path));
         } else if (canDeleteSettingEntry(entry)) {
-            btn.appendChild(buildSettingDeleteButton(entry));
+            actions.appendChild(buildProjectDeleteButton(entry, 'setting'));
+        }
+        if (actions.childElementCount > 0) {
+            btn.appendChild(actions);
         }
         return btn;
     }
@@ -1980,25 +2112,34 @@
         showCompactionToast('Setting file created.', 'info');
     }
 
-    function deleteProjectSettingEntry(path, kind) {
+    function deleteProjectEntry(path, kind, scope = 'setting') {
         const target = { path: normalizeProjectPath(path), kind: kind === 'directory' ? 'directory' : 'file' };
+        const targetScope = scope === 'workspace' ? 'workspace' : 'setting';
         if (!target?.path) {
             showCompactionToast('Select an item before deleting.', 'error');
             return;
         }
-        if (isProtectedSettingEntry(target.path)) {
+        if (targetScope === 'setting' && isProtectedSettingEntry(target.path)) {
             showCompactionToast('This setting entry cannot be deleted.', 'error');
             return;
         }
-        const label = target.kind === 'directory' ? 'folder and all contents' : 'file';
+        if (targetScope === 'workspace' && (target.kind !== 'directory' || target.path.includes('/'))) {
+            showCompactionToast('Only workspace projects can be deleted from here.', 'error');
+            return;
+        }
+        const label = targetScope === 'workspace'
+            ? 'workspace project and all contents'
+            : target.kind === 'directory'
+                ? 'folder and all contents'
+                : 'file';
         const ok = window.confirm(`Delete ${label} "${target.path}"?`);
         if (!ok) return;
         const seq = state.projectFileSeq + 1;
         state.projectFileSeq = seq;
         const requestId = `entry-delete-${seq}`;
-        state.projectEntryDeletePending = { requestId, path: target.path, scope: 'setting', kind: target.kind };
+        state.projectEntryDeletePending = { requestId, path: target.path, scope: targetScope, kind: target.kind };
         const sent = sendWS(MsgType.DeleteProjectEntry, {
-            scope: 'setting',
+            scope: targetScope,
             path: target.path,
             request_id: requestId,
         });
@@ -2031,8 +2172,9 @@
         }
 
         const parentPath = normalizeProjectPath(deletedPath.split('/').slice(0, -1).join('/'));
-        requestProjectDir(parentPath || '', { scope: 'setting', force: true });
-        showCompactionToast(`${file.type === 'directory' ? 'Setting directory' : 'Setting file'} deleted.`, 'info');
+        const scope = p?.scope || pending?.scope || 'setting';
+        requestProjectDir(scope === 'workspace' ? '' : (parentPath || ''), { scope, force: true });
+        showCompactionToast(`${scope === 'workspace' ? 'Workspace project' : file.type === 'directory' ? 'Setting directory' : 'Setting file'} deleted.`, 'info');
     }
 
     function suggestedProjectSettingEntryPath(kind) {
@@ -2253,6 +2395,7 @@
     function bindProjectFilePanel() {
         if (state.projectPanelBound) return;
         state.projectPanelBound = true;
+        setProjectPanelCollapsed(loadProjectPanelCollapsed(), { persist: false });
         const actions = document.querySelector('.project-panel-actions');
         if (dom.projectPanelTabs && actions && actions.parentElement !== dom.projectPanelTabs) {
             dom.projectPanelTabs.appendChild(actions);
@@ -2273,9 +2416,12 @@
         if (dom.projectRefreshBtn) {
             dom.projectRefreshBtn.addEventListener('click', () => {
                 const scope = currentProjectScope();
-                const path = scope === 'setting' ? (state.projectDirPathByScope.setting || state.projectDirPath || '') : '';
+                const path = currentProjectPathForScope(scope);
                 requestProjectDir(path, { scope, force: true });
             });
+        }
+        if (dom.projectCollapseBtn) {
+            dom.projectCollapseBtn.addEventListener('click', () => setProjectPanelCollapsed(!state.projectPanelCollapsed));
         }
         if (dom.projectNewFileBtn) {
             dom.projectNewFileBtn.addEventListener('click', newProjectSettingFile);
@@ -2888,6 +3034,43 @@
         renderSendButton();
     }
 
+    function agentStatusLabel() {
+        if (state.agentStatus === 'thinking') return '思考中';
+        if (state.agentStatus === 'tool_running') return '工具执行中';
+        if (state.agentStatus === 'compacting') return '压缩中';
+        if (hasActiveSubAgents()) return '任务执行中';
+        if (state.streaming) return '生成回复中';
+        if (state.agentStatus === 'error') return '执行异常';
+        return '就绪';
+    }
+
+    function conversationStatusKey() {
+        if (state.agentStatus === 'thinking'
+            || state.agentStatus === 'tool_running'
+            || state.agentStatus === 'compacting'
+            || state.agentStatus === 'error') {
+            return state.agentStatus;
+        }
+        if (hasActiveSubAgents()) return 'tool_running';
+        if (state.streaming) return 'thinking';
+        return 'idle';
+    }
+
+    function renderConversationStatus() {
+        if (!dom.conversationStatus || !dom.conversationStatusText || !dom.conversationStatusDot) return;
+        const busy = isAgentBusy();
+        dom.conversationStatus.hidden = !busy;
+        if (!busy) {
+            dom.conversationStatus.dataset.status = 'idle';
+            dom.conversationStatusDot.dataset.status = 'idle';
+            return;
+        }
+        const status = conversationStatusKey();
+        dom.conversationStatus.dataset.status = status;
+        dom.conversationStatusDot.dataset.status = status;
+        dom.conversationStatusText.textContent = agentStatusLabel();
+    }
+
     function renderSendButton() {
         const busy = isAgentBusy();
         dom.input.disabled = busy;
@@ -2904,6 +3087,7 @@
             dom.sendBtn.onclick = onSendClicked;
             dom.sendBtn.title = '发送 (Enter)';
         }
+        renderConversationStatus();
     }
 
     function renderSessionList(sessions) {

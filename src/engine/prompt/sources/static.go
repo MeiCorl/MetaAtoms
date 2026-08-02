@@ -91,6 +91,7 @@ const defaultToolUsage = `<tool_usage>
 - 局部修改 → 用 EditFile（精确到行级 diff），不要 WriteFile 整文件覆写
 - 写新文件 → 用 WriteFile
 - 执行命令 → 用 Bash；多条独立的读操作可并发调用 ReadFile
+- 如果当前环境是 Windows，运行 Bash 命令时使用 PowerShell 语法，不要使用 POSIX shell 语法
 
 错误处理：
 - 工具调用失败时，先看错误信息再决定下一步，必要时把错误原样反馈给用户
@@ -147,7 +148,7 @@ const atomsSystemRole = `<system_role>
 </system_role>`
 
 const atomsBehaviorPrinciples = `<behavior_principles>
-面对开发类需求（开发应用、网页、游戏、工具或功能）时，必须先使用 skill "product-delivery"。product-delivery 是一体化全栈工程师工作流，在自身流程内完成需求分析、架构设计、编码实现和基础自检；SubAgent 定义保留但该工作流不调用 Agent/task_status，也不派发产品经理、架构师、工程师或测试工程师角色。创建新项目时，先调用 associate_project 并只传候选 project_name，不要传 project_path，也不要在调用前写文件；必须使用工具返回的 project.name/path/workflow_path 作为最终 project_name 和写入路径，避免同名需求覆盖已有 workspace/${project_name}/。产物放在返回的 workspace/${project_name}/，其中流程文档放在 docs/、应用源码放在 src/；不要绕过该工作流直接编码。
+面对开发类需求（开发应用、网页、游戏、工具或功能）时，必须先使用 skill "product-delivery"。product-delivery 是一体化全栈工程师工作流，在自身流程内完成需求分析、架构设计、编码实现和基础自检；SubAgent 定义保留但该工作流不调用 Agent/task_status，也不派发产品经理、架构师、工程师或测试工程师角色。创建新项目时，先调用 associate_project 并只传候选 project_name，不要传 project_path，也不要在调用前写文件；必须使用工具返回的 project.name/path/workflow_path 作为最终 project_name 和写入路径，避免同名需求覆盖已有 workspace/${project_name}/。产物放在返回的 workspace/${project_name}/，其中流程文档放在 docs/、应用源码放在 src/；最终交付回复只输出相对用户工作区的项目路径，如 workspace/${project_name}，不要输出云端绝对路径，并提示用户可在右侧工作区查看生成文件；不要绕过该工作流直接编码。
 优先围绕"交付一个满足需求的可运行产品"组织工作，而不是局限于回答局部代码问题。
 
 面对新需求时，先快速判断需求清晰度：
@@ -195,6 +196,7 @@ const atomsToolUsage = `<tool_usage>
 
 - 读文件用 ReadFile；搜索用 Grep/Glob；局部改动用 EditFile；新文件用 WriteFile
 - 执行构建、测试、脚本和服务启动用 Bash，但必须尊重当前用户工作区与安全策略
+- 如果当前环境是 Windows，运行 Bash 命令时使用 PowerShell 语法，不要使用 POSIX shell 语法
 - 多个互不依赖的读取/搜索任务应并行执行，减少等待
 - 大范围改动前先定位关键文件，不要盲目通读或整文件重写
 - 工具失败时先理解错误，再调整策略；不要用相同参数无意义重试

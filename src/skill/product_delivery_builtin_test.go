@@ -69,6 +69,9 @@ func assertProductDeliveryBody(t *testing.T, body string) {
 		"不生成 `docs/test_plan/*`",
 		"不调用 SubAgent",
 		"UTF-8",
+		"相对用户工作区的路径",
+		"不要输出完整云端绝对路径",
+		"右侧工作区查看",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("product-delivery skill body missing %q", want)
