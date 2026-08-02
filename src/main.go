@@ -1485,6 +1485,23 @@ func registerAuthAPI(mux *http.ServeMux, store *auth.Store, tenants *tenantManag
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
 	})
+	mux.HandleFunc("/preview/workspace/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		userID, ok := store.UserIDFromRequest(r)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if tenants == nil {
+			http.Error(w, "tenant manager unavailable", http.StatusInternalServerError)
+			return
+		}
+		workspaceRoot := filepath.Join(auth.UserDir(tenants.baseDir, userID), "workspace")
+		serveWorkspacePreview(w, r, workspaceRoot)
+	})
 }
 
 func cleanWorkspaceDownloadPath(raw string) (string, bool) {
@@ -1501,13 +1518,9 @@ func cleanWorkspaceDownloadPath(raw string) (string, bool) {
 }
 
 func serveWorkspaceProjectZip(w http.ResponseWriter, workspaceRoot, target, projectName string) error {
-	absWorkspace, err := filepath.Abs(workspaceRoot)
+	absWorkspace, err := secureWorkspaceRoot(workspaceRoot)
 	if err != nil {
-		return fmt.Errorf("resolve workspace root: %w", err)
-	}
-	absWorkspace = filepath.Clean(absWorkspace)
-	if realWorkspace, err := filepath.EvalSymlinks(absWorkspace); err == nil {
-		absWorkspace = filepath.Clean(realWorkspace)
+		return err
 	}
 	realTarget, err := filepath.EvalSymlinks(target)
 	if err != nil {
@@ -1585,4 +1598,78 @@ func serveWorkspaceProjectZip(w http.ResponseWriter, workspaceRoot, target, proj
 		}
 		return closeErr
 	})
+}
+
+func serveWorkspacePreview(w http.ResponseWriter, r *http.Request, workspaceRoot string) {
+	rel, ok := cleanWorkspacePreviewPath(strings.TrimPrefix(r.URL.Path, "/preview/workspace/"))
+	if !ok {
+		http.Error(w, "invalid preview path", http.StatusBadRequest)
+		return
+	}
+	absWorkspace, err := secureWorkspaceRoot(workspaceRoot)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	target := filepath.Join(absWorkspace, filepath.FromSlash(rel))
+	realTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	realTarget = filepath.Clean(realTarget)
+	if !security.IsPathInside(realTarget, absWorkspace) {
+		http.Error(w, "preview path escapes workspace", http.StatusBadRequest)
+		return
+	}
+	info, err := os.Stat(realTarget)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if info.IsDir() {
+		indexPath := filepath.Join(realTarget, "index.html")
+		indexInfo, err := os.Stat(indexPath)
+		if err != nil || indexInfo.IsDir() {
+			srcIndexPath := filepath.Join(realTarget, "src", "index.html")
+			if srcIndexInfo, srcIndexErr := os.Stat(srcIndexPath); srcIndexErr == nil && !srcIndexInfo.IsDir() {
+				redirectPath := strings.TrimRight(r.URL.Path, "/") + "/src/"
+				http.Redirect(w, r, redirectPath, http.StatusFound)
+				return
+			}
+			http.Error(w, "该类型项目暂不支持直接预览，请按交付提示下载源码构建后运行", http.StatusNotFound)
+			return
+		}
+		realTarget = indexPath
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, realTarget)
+}
+
+func secureWorkspaceRoot(workspaceRoot string) (string, error) {
+	absWorkspace, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace root: %w", err)
+	}
+	absWorkspace = filepath.Clean(absWorkspace)
+	if realWorkspace, err := filepath.EvalSymlinks(absWorkspace); err == nil {
+		absWorkspace = filepath.Clean(realWorkspace)
+	}
+	return absWorkspace, nil
+}
+
+func cleanWorkspacePreviewPath(raw string) (string, bool) {
+	p := strings.TrimSpace(filepath.ToSlash(raw))
+	p = strings.TrimLeft(p, "/")
+	if p == "" || strings.ContainsRune(p, '\x00') {
+		return "", false
+	}
+	clean := filepath.Clean(filepath.FromSlash(p))
+	if clean == "." || clean == ".." || filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" {
+		return "", false
+	}
+	if strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(clean), true
 }

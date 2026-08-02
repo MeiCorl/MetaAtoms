@@ -13,7 +13,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-    <link rel="stylesheet" href="/style.css?v=20260802-conversation-status">
+    <link rel="stylesheet" href="/style.css?v=20260802-workspace-boundary">
     <link rel="stylesheet" href="/vendor/highlight-theme.css?v=20260731-atom-icon">
 
     <!-- 主题同步：默认亮色；HTML 解析期立即从 localStorage 读取并写到 <html data-theme="...">，
@@ -382,6 +382,30 @@
                 </div>
             </div>
         </div>
+        <div id="workspace-preview-modal" class="workspace-preview-modal" hidden role="dialog" aria-modal="true" aria-labelledby="workspace-preview-modal-title">
+            <div class="workspace-preview-modal-backdrop" data-workspace-preview-modal-close></div>
+            <div class="workspace-preview-modal-inner">
+                <div class="workspace-preview-modal-header">
+                    <div class="workspace-preview-modal-title-wrap">
+                        <span id="workspace-preview-modal-title" class="workspace-preview-modal-title">Preview</span>
+                        <span id="workspace-preview-modal-path" class="workspace-preview-modal-path">--</span>
+                    </div>
+                    <div class="workspace-preview-modal-actions">
+                        <button id="workspace-preview-modal-open" class="workspace-preview-modal-open" type="button" title="Open in new tab" aria-label="Open in new tab">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M15 3h6v6"/>
+                                <path d="M10 14 21 3"/>
+                                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                            </svg>
+                        </button>
+                        <button id="workspace-preview-modal-close" class="workspace-preview-modal-close" data-workspace-preview-modal-close type="button" title="Close (Esc)" aria-label="Close preview">×</button>
+                    </div>
+                </div>
+                <div class="workspace-preview-frame-wrap">
+                    <iframe id="workspace-preview-frame" class="workspace-preview-frame" title="Workspace project preview" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-same-origin"></iframe>
+                </div>
+            </div>
+        </div>
         <!-- SP 导出结果模态框 -->
         <div id="sp-modal" class="sp-modal" hidden>
             <div class="sp-modal-backdrop" data-sp-modal-close></div>
@@ -463,6 +487,6 @@
     <script src="/vendor/highlight.min.js?v=20260731-atom-icon" defer></script>
     <!-- Step 1.4 接入 diff-match-patch：app.js 的 openFileDiffModal 通过全局 diff_match_patch 计算行级 diff -->
     <script src="/vendor/diff-match-patch.min.js?v=20260731-atom-icon" defer></script>
-    <script src="/app.js?v=20260802-conversation-status" defer></script>
+    <script src="/app.js?v=20260802-workspace-boundary" defer></script>
 </body>
 </html>

@@ -110,6 +110,11 @@
         projectFileModalLanguage: $('project-file-modal-language'),
         projectFileModalBody:  $('project-file-modal-body'),
         projectFileModalSave:  $('project-file-modal-save'),
+        workspacePreviewModal: $('workspace-preview-modal'),
+        workspacePreviewTitle: $('workspace-preview-modal-title'),
+        workspacePreviewPath:  $('workspace-preview-modal-path'),
+        workspacePreviewOpen:  $('workspace-preview-modal-open'),
+        workspacePreviewFrame: $('workspace-preview-frame'),
         projectTabButtons:     Array.from(document.querySelectorAll('[data-project-tab]')),
         projectTabPanels:      Array.from(document.querySelectorAll('[data-project-tab-panel]')),
         projectGitRefreshBtn:  $('project-git-refresh-btn'),
@@ -1097,12 +1102,19 @@
         return state.projectScope === 'workspace' || state.projectScope === 'setting';
     }
 
+    function isWorkspaceRootProjectList() {
+        return state.projectScope === 'workspace' && !normalizeProjectPath(state.projectDirPath);
+    }
+
     function renderProjectFileList(entries, parentPath) {
         if (!dom.projectFileList) return;
         const projectOpen = isWorkspaceProjectOpen();
+        const workspaceRoot = isWorkspaceRootProjectList();
         if (dom.projectPanel) dom.projectPanel.classList.toggle('is-workspace-project', projectOpen);
+        if (dom.projectPanel) dom.projectPanel.classList.toggle('is-workspace-root', workspaceRoot);
         if (dom.app) dom.app.classList.toggle('is-workspace-project-open', projectOpen);
         if (dom.projectWorkspacePreview) dom.projectWorkspacePreview.hidden = !projectOpen;
+        dom.projectFileList.classList.toggle('is-workspace-root', workspaceRoot);
         dom.projectFileList.innerHTML = '';
         if (state.projectDirPath) {
             dom.projectFileList.appendChild(buildProjectParentItem(parentPath));
@@ -1218,6 +1230,59 @@
         return action;
     }
 
+    function workspacePreviewURL(path) {
+        const normalized = normalizeProjectPath(path);
+        const parts = normalized.split('/').filter(Boolean).map(encodeURIComponent);
+        return parts.length ? `/preview/workspace/${parts.join('/')}/` : '';
+    }
+
+    function canPreviewWorkspaceProject(entry) {
+        const path = normalizeProjectPath(entry?.path);
+        return state.projectScope === 'workspace' && !state.projectDirPath && entry?.type === 'directory' && !!path && !path.includes('/');
+    }
+
+    function openWorkspacePreview(path) {
+        const normalized = normalizeProjectPath(path);
+        const url = workspacePreviewURL(normalized);
+        if (!url || !dom.workspacePreviewModal || !dom.workspacePreviewFrame) return;
+        const title = normalized.split('/').filter(Boolean).pop() || 'Preview';
+        if (dom.workspacePreviewTitle) dom.workspacePreviewTitle.textContent = title;
+        if (dom.workspacePreviewPath) {
+            dom.workspacePreviewPath.textContent = normalized;
+            dom.workspacePreviewPath.title = normalized;
+        }
+        if (dom.workspacePreviewOpen) {
+            dom.workspacePreviewOpen.onclick = () => window.open(url, '_blank', 'noopener,noreferrer');
+        }
+        dom.workspacePreviewFrame.src = url;
+        dom.workspacePreviewModal.hidden = false;
+    }
+
+    function closeWorkspacePreview() {
+        if (dom.workspacePreviewFrame) dom.workspacePreviewFrame.removeAttribute('src');
+        if (dom.workspacePreviewModal) dom.workspacePreviewModal.hidden = true;
+    }
+
+    function buildWorkspacePreviewButton(path) {
+        const action = document.createElement('span');
+        action.className = 'project-file-action project-file-preview';
+        action.setAttribute('role', 'button');
+        action.setAttribute('tabindex', '0');
+        action.title = 'Preview app';
+        action.setAttribute('aria-label', 'Preview app');
+        action.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.1 12.4a11 11 0 0 1 19.8 0 11 11 0 0 1-19.8 0Z"/><circle cx="12" cy="12" r="3"/></svg>';
+        const preview = (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            openWorkspacePreview(path);
+        };
+        action.addEventListener('click', preview);
+        action.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') preview(ev);
+        });
+        return action;
+    }
+
     function isProtectedSettingEntry(path) {
         const p = normalizeProjectPath(path);
         return p === 'setting.json' || p === 'skills' || p === 'agents' || p === 'memory';
@@ -1261,6 +1326,7 @@
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = `project-file-item ${isDir ? 'is-directory' : 'is-file'}`;
+        if (canDeleteWorkspaceProject(entry)) btn.classList.add('is-workspace-project-item');
         if (!isDir && entry && entry.previewable === false) btn.classList.add('is-unpreviewable');
         btn.title = path || entry?.name || '';
         btn.dataset.path = path;
@@ -1295,6 +1361,9 @@
         btn.appendChild(main);
         const actions = document.createElement('span');
         actions.className = 'project-file-actions';
+        if (canPreviewWorkspaceProject(entry)) {
+            actions.appendChild(buildWorkspacePreviewButton(path));
+        }
         if (canDeleteWorkspaceProject(entry)) {
             actions.appendChild(buildProjectDeleteButton(entry, 'workspace'));
             actions.appendChild(buildWorkspaceDownloadButton(path));
@@ -1384,9 +1453,12 @@
         state.projectScope = scope;
         state.projectDirPath = path;
         setProjectChrome(scope);
+        const workspaceRoot = scope === 'workspace' && !normalizeProjectPath(path);
         if (dom.projectPanel) dom.projectPanel.classList.toggle('is-workspace-project', true);
+        if (dom.projectPanel) dom.projectPanel.classList.toggle('is-workspace-root', workspaceRoot);
         if (dom.app) dom.app.classList.toggle('is-workspace-project-open', true);
         if (dom.projectWorkspacePreview) dom.projectWorkspacePreview.hidden = false;
+        if (dom.projectFileList) dom.projectFileList.classList.toggle('is-workspace-root', workspaceRoot);
         if (state.projectWorkspacePreviewScope !== scope) clearWorkspacePreview();
         renderProjectPathbar(path, []);
         if (options.noLoad) return;
@@ -2440,9 +2512,17 @@
                 el.addEventListener('click', closeProjectFileModal);
             });
         }
+        if (dom.workspacePreviewModal) {
+            dom.workspacePreviewModal.querySelectorAll('[data-workspace-preview-modal-close]').forEach(el => {
+                el.addEventListener('click', closeWorkspacePreview);
+            });
+        }
         document.addEventListener('keydown', (ev) => {
             if (ev.key === 'Escape' && dom.projectFileModal && !dom.projectFileModal.hidden) {
                 closeProjectFileModal();
+            }
+            if (ev.key === 'Escape' && dom.workspacePreviewModal && !dom.workspacePreviewModal.hidden) {
+                closeWorkspacePreview();
             }
         });
         renderProjectPathbar('', []);
