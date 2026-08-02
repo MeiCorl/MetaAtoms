@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -322,6 +323,9 @@ func (h *Handler) Register(router *Router) {
 	router.Register(MsgTypeGetFileDiff, h.handleGetFileDiff)
 	router.Register(MsgTypeListProjectDir, h.handleListProjectDir)
 	router.Register(MsgTypeReadProjectFile, h.handleReadProjectFile)
+	router.Register(MsgTypeWriteProjectFile, h.handleWriteProjectFile)
+	router.Register(MsgTypeCreateProjectEntry, h.handleCreateProjectEntry)
+	router.Register(MsgTypeDeleteProjectEntry, h.handleDeleteProjectEntry)
 	router.Register(MsgTypeListProjectGitChanges, h.handleListProjectGitChanges)
 	router.Register(MsgTypeReadProjectGitDiff, h.handleReadProjectGitDiff)
 	router.Register(MsgTypeSearchProject, h.handleSearchProject)
@@ -1221,8 +1225,23 @@ func (h *Handler) handleListProjectDir(conn *websocket.Conn, msg Message) error 
 		return h.sendProjectDir(conn, ProjectDirPayload{OK: false, Reason: "invalid_payload"})
 	}
 
-	result, err := NewProjectFileBrowser(h.workdir).ListDir(p.Path)
+	scope := normalizeProjectScope(p.Scope)
+	browser, err := h.projectBrowserForScope(scope)
+	if err != nil {
+		return h.sendProjectDir(conn, ProjectDirPayload{OK: false, Scope: scope, Reason: ProjectFileReasonInvalidScope, RequestID: p.RequestID})
+	}
+	if !settingScopeAllowsPath(scope, p.Path) {
+		return h.sendProjectDir(conn, ProjectDirPayload{OK: false, Scope: scope, Reason: ProjectFileReasonOutsideWorkdir, RequestID: p.RequestID})
+	}
+	result, err := browser.ListDir(p.Path)
+	if scope == ProjectFileScopeWorkspace && err == nil {
+		filterWorkspaceRootEntries(&result)
+	}
+	if scope == ProjectFileScopeSetting && err == nil {
+		filterSettingRootEntries(&result)
+	}
 	payload := projectDirPayloadFromResult(result, err == nil)
+	payload.Scope = scope
 	payload.RequestID = p.RequestID
 	if payload.Reason == "" && err != nil {
 		payload.Reason = ProjectFileReasonReadError
@@ -1236,13 +1255,129 @@ func (h *Handler) handleReadProjectFile(conn *websocket.Conn, msg Message) error
 		return h.sendProjectFile(conn, ProjectFilePayload{Found: false, OK: false, Reason: "invalid_payload"})
 	}
 
-	result, err := NewProjectFileBrowser(h.workdir).ReadFile(p.Path)
+	scope := normalizeProjectScope(p.Scope)
+	browser, err := h.projectBrowserForScope(scope)
+	if err != nil {
+		return h.sendProjectFile(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonInvalidScope, RequestID: p.RequestID})
+	}
+	if !settingScopeAllowsPath(scope, p.Path) {
+		return h.sendProjectFile(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonOutsideWorkdir, RequestID: p.RequestID})
+	}
+	result, err := browser.ReadFile(p.Path)
 	payload := projectFilePayloadFromResult(result)
+	if payload.File.Path == "" && strings.TrimSpace(p.Path) != "" {
+		payload.File = ProjectFileEntry{
+			Name:       filepath.Base(filepath.FromSlash(p.Path)),
+			Path:       filepath.ToSlash(strings.Trim(strings.TrimSpace(p.Path), "/")),
+			Type:       ProjectFileTypeFile,
+			RenderType: ProjectRenderTypePlain,
+		}
+	}
+	payload.Scope = scope
 	payload.RequestID = p.RequestID
 	if payload.Reason == "" && err != nil {
 		payload.Reason = ProjectFileReasonReadError
 	}
 	return h.sendProjectFile(conn, payload)
+}
+
+func (h *Handler) handleWriteProjectFile(conn *websocket.Conn, msg Message) error {
+	p, err := AsPayload[WriteProjectFilePayload](msg)
+	if err != nil {
+		return h.sendProjectFileWritten(conn, ProjectFilePayload{Found: false, OK: false, Reason: "invalid_payload"})
+	}
+	scope := normalizeProjectScope(p.Scope)
+	if scope != ProjectFileScopeSetting {
+		return h.sendProjectFileWritten(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonWriteDenied, RequestID: p.RequestID})
+	}
+	if !settingScopeAllowsPath(scope, p.Path) || strings.TrimSpace(p.Path) == "" {
+		return h.sendProjectFileWritten(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonOutsideWorkdir, RequestID: p.RequestID})
+	}
+	cleanPath := strings.Trim(strings.TrimSpace(filepath.ToSlash(p.Path)), "/")
+	if cleanPath == "setting.json" && !json.Valid([]byte(p.Content)) {
+		return h.sendProjectFileWritten(conn, ProjectFilePayload{Found: true, OK: false, Scope: scope, Reason: ProjectFileReasonInvalidJSON, RequestID: p.RequestID, File: ProjectFileEntry{
+			Name:       "setting.json",
+			Path:       "setting.json",
+			Type:       ProjectFileTypeFile,
+			RenderType: ProjectRenderTypeJSON,
+			Language:   "json",
+		}})
+	}
+	browser, err := h.projectBrowserForScope(scope)
+	if err != nil {
+		return h.sendProjectFileWritten(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonInvalidScope, RequestID: p.RequestID})
+	}
+	result, err := browser.WriteTextFile(p.Path, p.Content)
+	payload := projectFilePayloadFromResult(result)
+	if payload.File.Path == "" && strings.TrimSpace(p.Path) != "" {
+		payload.File = ProjectFileEntry{
+			Name:       filepath.Base(filepath.FromSlash(p.Path)),
+			Path:       filepath.ToSlash(strings.Trim(strings.TrimSpace(p.Path), "/")),
+			Type:       ProjectFileTypeFile,
+			RenderType: ProjectRenderTypePlain,
+		}
+	}
+	payload.Scope = scope
+	payload.RequestID = p.RequestID
+	if payload.Reason == "" && err != nil {
+		payload.Reason = ProjectFileReasonReadError
+	}
+	return h.sendProjectFileWritten(conn, payload)
+}
+
+func (h *Handler) handleCreateProjectEntry(conn *websocket.Conn, msg Message) error {
+	p, err := AsPayload[CreateProjectEntryPayload](msg)
+	if err != nil {
+		return h.sendProjectEntryCreated(conn, ProjectFilePayload{Found: false, OK: false, Reason: "invalid_payload"})
+	}
+	scope := normalizeProjectScope(p.Scope)
+	if scope != ProjectFileScopeSetting {
+		return h.sendProjectEntryCreated(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonWriteDenied, RequestID: p.RequestID})
+	}
+	if !settingScopeAllowsPath(scope, p.Path) {
+		return h.sendProjectEntryCreated(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonOutsideWorkdir, RequestID: p.RequestID})
+	}
+	browser, err := h.projectBrowserForScope(scope)
+	if err != nil {
+		return h.sendProjectEntryCreated(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonInvalidScope, RequestID: p.RequestID})
+	}
+	result, err := browser.CreateEntry(p.Path, p.Kind)
+	payload := projectFilePayloadFromResult(result)
+	payload.Scope = scope
+	payload.RequestID = p.RequestID
+	if err != nil && payload.Reason == "" {
+		payload.Reason = ProjectFileReasonReadError
+	}
+	return h.sendProjectEntryCreated(conn, payload)
+}
+
+func (h *Handler) handleDeleteProjectEntry(conn *websocket.Conn, msg Message) error {
+	p, err := AsPayload[DeleteProjectEntryPayload](msg)
+	if err != nil {
+		return h.sendProjectEntryDeleted(conn, ProjectFilePayload{Found: false, OK: false, Reason: "invalid_payload"})
+	}
+	scope := normalizeProjectScope(p.Scope)
+	if scope != ProjectFileScopeSetting {
+		return h.sendProjectEntryDeleted(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonWriteDenied, RequestID: p.RequestID})
+	}
+	if !settingScopeAllowsPath(scope, p.Path) {
+		return h.sendProjectEntryDeleted(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonOutsideWorkdir, RequestID: p.RequestID})
+	}
+	if settingScopeProtectsDeletePath(scope, p.Path) {
+		return h.sendProjectEntryDeleted(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonWriteDenied, RequestID: p.RequestID})
+	}
+	browser, err := h.projectBrowserForScope(scope)
+	if err != nil {
+		return h.sendProjectEntryDeleted(conn, ProjectFilePayload{Found: false, OK: false, Scope: scope, Reason: ProjectFileReasonInvalidScope, RequestID: p.RequestID})
+	}
+	result, err := browser.DeleteEntry(p.Path)
+	payload := projectFilePayloadFromResult(result)
+	payload.Scope = scope
+	payload.RequestID = p.RequestID
+	if err != nil && payload.Reason == "" {
+		payload.Reason = ProjectFileReasonReadError
+	}
+	return h.sendProjectEntryDeleted(conn, payload)
 }
 
 func (h *Handler) handleListProjectGitChanges(conn *websocket.Conn, msg Message) error {
@@ -1283,14 +1418,27 @@ func (h *Handler) handleSearchProject(conn *websocket.Conn, msg Message) error {
 	if err != nil {
 		return h.sendProjectSearch(conn, ProjectSearchPayload{OK: false, Reason: "invalid_payload"})
 	}
+	scope := normalizeProjectScope(p.Scope)
+	browser, err := h.projectBrowserForScope(scope)
+	if err != nil {
+		return h.sendProjectSearch(conn, ProjectSearchPayload{OK: false, Scope: scope, Reason: ProjectFileReasonInvalidScope, RequestID: p.RequestID})
+	}
+	root, err := browser.projectRoot()
+	if err != nil {
+		return h.sendProjectSearch(conn, ProjectSearchPayload{OK: false, Scope: scope, Reason: ProjectFileReasonEmptyWorkdir, RequestID: p.RequestID})
+	}
+	if !settingScopeAllowsPath(scope, p.Path) {
+		return h.sendProjectSearch(conn, ProjectSearchPayload{OK: false, Scope: scope, Reason: ProjectFileReasonOutsideWorkdir, RequestID: p.RequestID})
+	}
 
-	result, err := NewProjectSearcher(h.workdir).Search(ProjectSearchRequest{
+	result, err := NewProjectSearcher(root).Search(ProjectSearchRequest{
 		Query:   p.Query,
 		Path:    p.Path,
 		Regex:   p.Regex,
 		Exclude: p.Exclude,
 	})
 	payload := projectSearchPayloadFromResult(result)
+	payload.Scope = scope
 	payload.RequestID = p.RequestID
 	if payload.Reason == "" && err != nil {
 		payload.Reason = ProjectFileReasonReadError
@@ -1360,6 +1508,109 @@ func projectFilePayloadFromResult(result ProjectFileResult) ProjectFilePayload {
 		File:    result.File,
 		Content: result.Content,
 	}
+}
+
+func normalizeProjectScope(scope string) string {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "", "files", ProjectFileScopeWorkspace:
+		return ProjectFileScopeWorkspace
+	case ProjectFileScopeSetting:
+		return ProjectFileScopeSetting
+	default:
+		return strings.ToLower(strings.TrimSpace(scope))
+	}
+}
+
+func (h *Handler) projectBrowserForScope(scope string) (*ProjectFileBrowser, error) {
+	switch scope {
+	case ProjectFileScopeWorkspace:
+		return NewProjectFileBrowser(filepath.Join(h.workdir, "workspace")), nil
+	case ProjectFileScopeSetting:
+		return NewProjectFileBrowser(h.workdir), nil
+	default:
+		return nil, fmt.Errorf("unknown project browser scope: %s", scope)
+	}
+}
+
+func settingScopeAllowsPath(scope, relPath string) bool {
+	if scope != ProjectFileScopeSetting {
+		return true
+	}
+	p := strings.TrimSpace(filepath.ToSlash(relPath))
+	p = strings.Trim(p, "/")
+	if p == "" || p == "." {
+		return true
+	}
+	if p == "setting.json" {
+		return true
+	}
+	first := p
+	if idx := strings.Index(first, "/"); idx >= 0 {
+		first = first[:idx]
+	}
+	switch first {
+	case "skills", "agents", "memory":
+		return true
+	default:
+		return false
+	}
+}
+
+func settingScopeProtectsDeletePath(scope, relPath string) bool {
+	if scope != ProjectFileScopeSetting {
+		return false
+	}
+	p := strings.Trim(strings.TrimSpace(filepath.ToSlash(relPath)), "/")
+	switch p {
+	case "setting.json", "skills", "agents", "memory":
+		return true
+	default:
+		return false
+	}
+}
+
+func filterWorkspaceRootEntries(result *ProjectDirResult) {
+	if result == nil || strings.TrimSpace(result.Path) != "" {
+		return
+	}
+	filtered := make([]ProjectFileEntry, 0, len(result.Entries))
+	for _, entry := range result.Entries {
+		if entry.Type == ProjectFileTypeDirectory {
+			filtered = append(filtered, entry)
+		}
+	}
+	result.Entries = filtered
+}
+
+func filterSettingRootEntries(result *ProjectDirResult) {
+	if result == nil || strings.TrimSpace(result.Path) != "" {
+		return
+	}
+	byName := make(map[string]ProjectFileEntry, len(result.Entries)+1)
+	for _, entry := range result.Entries {
+		switch entry.Name {
+		case "setting.json", "skills", "agents", "memory":
+			byName[entry.Name] = entry
+		}
+	}
+	if _, ok := byName["setting.json"]; !ok {
+		byName["setting.json"] = ProjectFileEntry{
+			Name:        "setting.json",
+			Path:        "setting.json",
+			Type:        ProjectFileTypeFile,
+			Previewable: true,
+			Language:    "json",
+			RenderType:  ProjectRenderTypeJSON,
+		}
+	}
+	order := []string{"setting.json", "skills", "agents", "memory"}
+	filtered := make([]ProjectFileEntry, 0, len(order))
+	for _, name := range order {
+		if entry, ok := byName[name]; ok {
+			filtered = append(filtered, entry)
+		}
+	}
+	result.Entries = filtered
 }
 
 // ---- Slash 命令下发相关 handler（Step 9.1 Task 4） ----
@@ -2075,6 +2326,18 @@ func (h *Handler) sendProjectDir(conn *websocket.Conn, p ProjectDirPayload) erro
 
 func (h *Handler) sendProjectFile(conn *websocket.Conn, p ProjectFilePayload) error {
 	return h.sendMessage(conn, MsgTypeProjectFile, p)
+}
+
+func (h *Handler) sendProjectFileWritten(conn *websocket.Conn, p ProjectFilePayload) error {
+	return h.sendMessage(conn, MsgTypeProjectFileWritten, p)
+}
+
+func (h *Handler) sendProjectEntryCreated(conn *websocket.Conn, p ProjectFilePayload) error {
+	return h.sendMessage(conn, MsgTypeProjectEntryCreated, p)
+}
+
+func (h *Handler) sendProjectEntryDeleted(conn *websocket.Conn, p ProjectFilePayload) error {
+	return h.sendMessage(conn, MsgTypeProjectEntryDeleted, p)
 }
 
 func (h *Handler) sendProjectGitChanges(conn *websocket.Conn, p ProjectGitChangesPayload) error {

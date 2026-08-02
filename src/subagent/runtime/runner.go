@@ -139,14 +139,13 @@ func (r *Runner) RunDefined(ctx context.Context, req DefinedRunRequest) (*RunRes
 		Status:    RunStatusCompleted,
 		StartedAt: startedAt,
 		Prompt: PromptTrace{
-			Type:         SubAgentTypeDefined,
-			RoleName:     req.Definition.Name,
-			Task:         task,
-			Metadata:     cloneMetadata(req.Metadata),
-			SystemBlocks: systemBlockTexts(sp),
-			ToolNames:    append([]string(nil), iso.ToolView.Names...),
-			Model:        req.Definition.Model,
-			MaxTurns:     maxTurns,
+			Type:      SubAgentTypeDefined,
+			RoleName:  req.Definition.Name,
+			Task:      task,
+			Metadata:  cloneMetadata(req.Metadata),
+			ToolNames: append([]string(nil), iso.ToolView.Names...),
+			Model:     req.Definition.Model,
+			MaxTurns:  maxTurns,
 		},
 	}
 
@@ -207,17 +206,6 @@ func (r *Runner) resolveMaxTurns(req DefinedRunRequest) int {
 		return r.maxTurns
 	}
 	return defaultRunnerMaxTurns
-}
-
-func systemBlockTexts(sp llm.SystemPrompt) []string {
-	out := make([]string, 0, len(sp.SystemBlocks))
-	for _, block := range sp.SystemBlocks {
-		if strings.TrimSpace(block.Text) == "" {
-			continue
-		}
-		out = append(out, block.Text)
-	}
-	return out
 }
 
 func usageSummary(usage llm.TokenUsage) UsageSummary {

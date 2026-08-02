@@ -118,7 +118,6 @@ func (r *Runner) RunFork(ctx context.Context, req ForkRunRequest) (*RunResult, e
 			RoleName:           req.Definition.Name,
 			Task:               task,
 			Metadata:           cloneMetadata(req.Metadata),
-			SystemBlocks:       systemBlockTexts(sp),
 			ToolNames:          append([]string(nil), iso.ToolView.Names...),
 			Model:              req.Definition.Model,
 			MaxTurns:           maxTurns,

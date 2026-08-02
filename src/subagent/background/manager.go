@@ -248,7 +248,9 @@ func applyRunResult(task *TaskSnapshot, result *subagentruntime.RunResult) {
 	task.ToolCalls = result.ToolCalls
 	task.Usage = result.Usage
 	task.Error = result.Error
-	task.Trace = &result.Trace
+	trace := result.Trace
+	trace.Prompt.SystemBlocks = nil
+	task.Trace = &trace
 	task.Output = result.Trace.Output
 	if !result.Trace.StartedAt.IsZero() {
 		task.StartedAt = result.Trace.StartedAt
@@ -259,6 +261,7 @@ func applyRunResult(task *TaskSnapshot, result *subagentruntime.RunResult) {
 	if task.Prompt.Type == "" {
 		task.Prompt = result.Trace.Prompt
 	}
+	task.Prompt.SystemBlocks = nil
 }
 
 func isCanceledResult(result *subagentruntime.RunResult, err error) bool {

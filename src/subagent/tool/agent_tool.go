@@ -49,7 +49,7 @@ func NewAgentTool(opts AgentToolOptions) *AgentTool {
 	return &AgentTool{
 		BaseTool: coretool.BaseTool{
 			ToolName:        AgentToolName,
-			ToolDescription: "Run an isolated SubAgent. Use type=defined for a role definition from a blank child conversation, or type=fork to inherit the parent conversation snapshot and run in the background. Backgrounded runs notify the main Agent automatically on completion; do not poll task_status unless the user explicitly asks for diagnostics.",
+			ToolDescription: "Run an isolated SubAgent. Use type=defined for a role definition from a blank child conversation, or type=fork to inherit the parent conversation snapshot and run in the background. Backgrounded runs notify the main Agent automatically on completion; orchestrated workflows may use task_status with wait=true to wait for a known batch.",
 			ToolInputSchema: agentToolSchema,
 			ToolPermission:  coretool.PermExec,
 		},
@@ -236,7 +236,7 @@ func (t *AgentTool) execute(ctx context.Context, in agentToolInput) agentToolOut
 			Status:       string(submitRes.Task.Status),
 			Backgrounded: true,
 			TaskID:       submitRes.Task.ID,
-			Message:      "SubAgent is running in the background. Do not poll task_status; the result will be delivered automatically to the main Agent when the task finishes, fails, or is canceled.",
+			Message:      "SubAgent is running in the background. The result will be delivered automatically when the task finishes, fails, or is canceled. For orchestrated batch waits, call task_status with wait=true and the known task_ids.",
 		}
 	}
 	if err != nil {
@@ -251,7 +251,7 @@ func (t *AgentTool) execute(ctx context.Context, in agentToolInput) agentToolOut
 		if submitRes.Result != nil {
 			out.FinalText = submitRes.Result.FinalText
 			out.StructuredOutput = cloneAnyMap(submitRes.Result.StructuredOutput)
-			out.Trace = &submitRes.Result.Trace
+			out.Trace = redactedTrace(submitRes.Result.Trace)
 			out.Usage = submitRes.Result.Usage
 		}
 		return out
@@ -271,11 +271,20 @@ func outputFromRunResult(result *subagentruntime.RunResult, taskID string) agent
 		TaskID:           taskID,
 		FinalText:        result.FinalText,
 		StructuredOutput: cloneAnyMap(result.StructuredOutput),
-		Trace:            &result.Trace,
+		Trace:            redactedTrace(result.Trace),
 		Usage:            result.Usage,
 		Error:            result.Error,
 	}
 	return out
+}
+
+func redactedTrace(in subagentruntime.Trace) *subagentruntime.Trace {
+	out := in
+	out.Prompt.SystemBlocks = nil
+	out.Prompt.Metadata = cloneAnyMap(in.Prompt.Metadata)
+	out.Prompt.ToolNames = append([]string(nil), in.Prompt.ToolNames...)
+	out.Output.StructuredOutput = cloneAnyMap(in.Output.StructuredOutput)
+	return &out
 }
 
 func permissionForRoleTools(allowedTools, deniedTools []string) coretool.ToolPermission {
@@ -400,7 +409,7 @@ var agentToolSchema = json.RawMessage(`{
     },
     "background": {
       "type": "boolean",
-      "description": "When true, return a task id immediately and continue the SubAgent in the background. The main Agent is notified automatically when the task reaches a terminal state; do not poll task_status unless the user explicitly asks for diagnostics. Fork requests are always backgrounded."
+      "description": "When true, return a task id immediately and continue the SubAgent in the background. The main Agent is notified automatically when the task reaches a terminal state; orchestrated workflows may wait for known batches with task_status(wait=true). Fork requests are always backgrounded."
     },
     "foreground_wait_seconds": {
       "type": "integer",

@@ -1,8 +1,9 @@
-﻿package web
+package web
 
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -35,8 +36,49 @@ func TestAssociateProjectToolDefaultsToWorkspacePath(t *testing.T) {
 	if assoc.project.Path != wantPath {
 		t.Fatalf("project path = %q, want %q", assoc.project.Path, wantPath)
 	}
+	if info, err := os.Stat(wantPath); err != nil || !info.IsDir() {
+		t.Fatalf("reserved project directory missing: info=%v err=%v", info, err)
+	}
 	if assoc.project.WorkflowID != "breakout-game" {
 		t.Fatalf("workflow id = %q", assoc.project.WorkflowID)
+	}
+	wantWorkflowPath := filepath.Join(userDir, "workspace", "breakout-game", "docs", "workflow.json")
+	if assoc.project.WorkflowPath != wantWorkflowPath {
+		t.Fatalf("workflow path = %q, want %q", assoc.project.WorkflowPath, wantWorkflowPath)
+	}
+	if !json.Valid([]byte(out)) {
+		t.Fatalf("output should be JSON: %s", out)
+	}
+}
+
+func TestAssociateProjectToolAllocatesUniqueWorkspacePath(t *testing.T) {
+	userDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(userDir, "workspace", "breakout-game"), 0755); err != nil {
+		t.Fatalf("create existing project: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(userDir, "workspace", "breakout-game-2"), 0755); err != nil {
+		t.Fatalf("create existing project: %v", err)
+	}
+	assoc := &fakeProjectAssociator{}
+	tool := NewAssociateProjectTool(userDir, assoc)
+
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"project_name":"breakout-game"}`))
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	wantName := "breakout-game-3"
+	wantPath := filepath.Join(userDir, "workspace", wantName)
+	if assoc.project.Name != wantName {
+		t.Fatalf("project name = %q, want %q", assoc.project.Name, wantName)
+	}
+	if assoc.project.Path != wantPath {
+		t.Fatalf("project path = %q, want %q", assoc.project.Path, wantPath)
+	}
+	if assoc.project.WorkflowID != wantName {
+		t.Fatalf("workflow id = %q, want %q", assoc.project.WorkflowID, wantName)
+	}
+	if assoc.project.WorkflowPath != filepath.Join(wantPath, "docs", "workflow.json") {
+		t.Fatalf("workflow path = %q", assoc.project.WorkflowPath)
 	}
 	if !json.Valid([]byte(out)) {
 		t.Fatalf("output should be JSON: %s", out)

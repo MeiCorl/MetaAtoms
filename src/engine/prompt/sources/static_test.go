@@ -22,9 +22,19 @@ func TestStaticSource_ProductDeliveryWorkflowMention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble failed: %v", err)
 	}
-	for _, kw := range []string{"product-delivery", "product-manager", "architect", "tech-lead", "engineer", "tester", "associate_project", "workspace/${project_name}/", "docs/workflow.json", "应用源码放在 src/"} {
+	for _, kw := range []string{"product-delivery", "一体化全栈工程师", "需求分析", "架构设计", "编码实现", "基础自检", "SubAgent 定义保留", "不调用 Agent/task_status", "associate_project", "不要传 project_path", "不要在调用前写文件", "project.name/path/workflow_path", "workspace/${project_name}/", "应用源码放在 src/"} {
 		if !strings.Contains(section.Content, kw) {
 			t.Errorf("static prompt should mention %q for product-delivery workflow", kw)
+		}
+	}
+	for _, forbidden := range []string{
+		"按 product-manager、architect、tech-lead、engineer、tester",
+		"阶段化工作流推进",
+		"测试负责人",
+		"任务拆解：把方案拆成可执行任务",
+	} {
+		if strings.Contains(section.Content, forbidden) {
+			t.Errorf("static prompt should not keep old product-delivery wording %q", forbidden)
 		}
 	}
 }

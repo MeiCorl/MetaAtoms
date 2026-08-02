@@ -48,14 +48,14 @@ type TaskSnapshot struct {
 func cloneSnapshot(in TaskSnapshot) TaskSnapshot {
 	out := in
 	out.Prompt.Metadata = cloneMap(in.Prompt.Metadata)
-	out.Prompt.SystemBlocks = append([]string(nil), in.Prompt.SystemBlocks...)
+	out.Prompt.SystemBlocks = nil
 	out.Prompt.ToolNames = append([]string(nil), in.Prompt.ToolNames...)
 	out.Output.StructuredOutput = cloneMap(in.Output.StructuredOutput)
 	out.StructuredOutput = cloneMap(in.StructuredOutput)
 	if in.Trace != nil {
 		trace := *in.Trace
 		trace.Prompt.Metadata = cloneMap(in.Trace.Prompt.Metadata)
-		trace.Prompt.SystemBlocks = append([]string(nil), in.Trace.Prompt.SystemBlocks...)
+		trace.Prompt.SystemBlocks = nil
 		trace.Prompt.ToolNames = append([]string(nil), in.Trace.Prompt.ToolNames...)
 		trace.Output.StructuredOutput = cloneMap(in.Trace.Output.StructuredOutput)
 		out.Trace = &trace

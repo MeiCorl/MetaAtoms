@@ -17,6 +17,7 @@
 package main
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -1094,7 +1095,32 @@ func ensureTenantDirs(userDir string) error {
 			return err
 		}
 	}
+	if err := ensureTenantSettingFile(filepath.Join(userDir, "setting.json")); err != nil {
+		return err
+	}
 	return nil
+}
+
+func ensureTenantSettingFile(path string) error {
+	if info, err := os.Stat(path); err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("tenant setting path is a directory: %s", path)
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if os.IsExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString("{}\n")
+	return err
 }
 
 func tenantMemoryRoot(tenantDir string) string {
@@ -1270,5 +1296,135 @@ func registerAuthAPI(mux *http.ServeMux, store *auth.Store, tenants *tenantManag
 			return
 		}
 		writeJSON(w, http.StatusOK, user)
+	})
+	mux.HandleFunc("/api/workspace/download", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		userID, ok := store.UserIDFromRequest(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if tenants == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tenant manager unavailable"})
+			return
+		}
+		project, ok := cleanWorkspaceDownloadPath(r.URL.Query().Get("path"))
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid workspace project path"})
+			return
+		}
+		workspaceRoot := filepath.Join(auth.UserDir(tenants.baseDir, userID), "workspace")
+		target := filepath.Join(workspaceRoot, project)
+		if err := serveWorkspaceProjectZip(w, workspaceRoot, target, project); err != nil {
+			logger.Warn("workspace project zip failed",
+				zap.String("user_id", userID),
+				zap.String("project", project),
+				zap.Error(err),
+			)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+	})
+}
+
+func cleanWorkspaceDownloadPath(raw string) (string, bool) {
+	p := strings.TrimSpace(filepath.ToSlash(raw))
+	p = strings.Trim(p, "/")
+	if p == "" || p == "." || p == ".." || strings.Contains(p, "/") || strings.ContainsRune(p, '\x00') {
+		return "", false
+	}
+	clean := filepath.Clean(filepath.FromSlash(p))
+	if clean == "." || clean == ".." || filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" {
+		return "", false
+	}
+	return filepath.Base(clean), true
+}
+
+func serveWorkspaceProjectZip(w http.ResponseWriter, workspaceRoot, target, projectName string) error {
+	absWorkspace, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return fmt.Errorf("resolve workspace root: %w", err)
+	}
+	absWorkspace = filepath.Clean(absWorkspace)
+	if realWorkspace, err := filepath.EvalSymlinks(absWorkspace); err == nil {
+		absWorkspace = filepath.Clean(realWorkspace)
+	}
+	realTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return fmt.Errorf("project not found: %w", err)
+	}
+	realTarget = filepath.Clean(realTarget)
+	if !security.IsPathInside(realTarget, absWorkspace) {
+		return fmt.Errorf("project path escapes workspace")
+	}
+	info, err := os.Stat(realTarget)
+	if err != nil {
+		return fmt.Errorf("stat project: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("workspace item is not a directory")
+	}
+
+	filename := projectName + ".zip"
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, strings.ReplaceAll(filename, `"`, "")))
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+	return filepath.WalkDir(realTarget, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if current == realTarget {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		realFile, err := filepath.EvalSymlinks(current)
+		if err != nil {
+			return err
+		}
+		if !security.IsPathInside(filepath.Clean(realFile), realTarget) {
+			return nil
+		}
+		rel, err := filepath.Rel(realTarget, current)
+		if err != nil {
+			return err
+		}
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(filepath.Join(projectName, rel))
+		header.Method = zip.Deflate
+		writer, err := zw.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(current)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(writer, f)
+		closeErr := f.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
 	})
 }

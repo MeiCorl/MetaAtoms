@@ -52,13 +52,13 @@ func TestProductDeliveryBuiltinRolesIncludeStructuredTemplates(t *testing.T) {
 			"```json",
 			"## requirements.md 模板",
 			"clarification_cards",
-			"requirements_summary",
+			"只返回完成状态",
 		},
 		"architect": {
 			"```json",
 			"## architecture.md 模板",
 			"```mermaid",
-			"architecture_summary",
+			"只返回完成状态",
 		},
 		"tech-lead": {
 			"```json",
@@ -68,15 +68,17 @@ func TestProductDeliveryBuiltinRolesIncludeStructuredTemplates(t *testing.T) {
 		},
 		"engineer": {
 			"```json",
-			"tasks.md 状态更新样例",
-			"files_changed",
-			"verification",
+			"只返回完成状态",
+			"不返回实现步骤",
+			"reason",
 		},
 		"tester": {
 			"```json",
-			"## checklists.md 模板",
-			"## test-report.md 模板",
-			"test_summary",
+			"## 测试计划文档模板",
+			"docs/test_plan",
+			"unit_test_plan.md",
+			"docs/test_plan/test-report.md",
+			"只返回完成状态",
 		},
 	}
 
@@ -92,6 +94,50 @@ func TestProductDeliveryBuiltinRolesIncludeStructuredTemplates(t *testing.T) {
 		}
 		if strings.Contains(def.SystemPrompt, "docs/product-delivery") {
 			t.Fatalf("role %q prompt should not use nested docs/product-delivery paths", name)
+		}
+	}
+
+	architect, _ := reg.Get("architect")
+	for _, forbidden := range []string{"implementation_plan", "engineer_prompt"} {
+		if strings.Contains(architect.SystemPrompt, forbidden) {
+			t.Fatalf("architect prompt should not pre-plan engineering work with %q", forbidden)
+		}
+	}
+	engineer, _ := reg.Get("engineer")
+	for _, forbidden := range []string{"implementation_id", "assigned_item"} {
+		if strings.Contains(engineer.SystemPrompt, forbidden) {
+			t.Fatalf("engineer prompt should not depend on pre-assigned implementation items with %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{"engineering_summary", "engineering_status", "files_changed", "verification"} {
+		if strings.Contains(engineer.SystemPrompt, forbidden) {
+			t.Fatalf("engineer prompt should not require verbose completion output %q", forbidden)
+		}
+	}
+	tester, _ := reg.Get("tester")
+	for _, forbidden := range []string{"checklists_path", "## checklists.md 模板", "test-results", "result_path"} {
+		if strings.Contains(tester.SystemPrompt, forbidden) {
+			t.Fatalf("tester prompt should not use shared checklist artifact %q", forbidden)
+		}
+	}
+}
+
+func TestEngineerSourceFileFrontmatter(t *testing.T) {
+	def, err := ParseFile("../builtin/engineer.md", 64*1024)
+	if err != nil {
+		t.Fatalf("parse engineer source file: %v", err)
+	}
+	if def.Name != "engineer" {
+		t.Fatalf("engineer source name = %q, want engineer", def.Name)
+	}
+	for _, want := range []string{"ReadFile", "WriteFile", "EditFile", "Glob", "Grep", "Bash"} {
+		if !containsTool(def.AllowedTools, want) {
+			t.Fatalf("engineer source allowed-tools missing %q: %v", want, def.AllowedTools)
+		}
+	}
+	for _, want := range []string{"只返回完成状态", "不返回实现步骤", "reason"} {
+		if !strings.Contains(def.SystemPrompt, want) {
+			t.Fatalf("engineer source prompt missing %q", want)
 		}
 	}
 }
@@ -126,6 +172,30 @@ func TestProductDeliveryBuiltinRoleToolPolicies(t *testing.T) {
 		}
 		if !containsTool(def.DeniedTools, "Bash") {
 			t.Fatalf("role %q should deny Bash: %v", name, def.DeniedTools)
+		}
+	}
+}
+
+func TestProductDeliveryBuiltinRolesRequireUTF8Communication(t *testing.T) {
+	reg, issues, err := LoadAll(LoadOptions{
+		MaxDefinitionSizeBytes: 64 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("LoadAll failed: %v", err)
+	}
+	if len(issues) != 0 {
+		t.Fatalf("LoadAll issues: %+v", issues)
+	}
+
+	for _, name := range []string{"product-manager", "architect", "engineer", "tester"} {
+		def, ok := reg.Get(name)
+		if !ok {
+			t.Fatalf("missing built-in SubAgent role %q", name)
+		}
+		for _, want := range []string{"UTF-8", "最终 JSON", "工具参数"} {
+			if !strings.Contains(def.SystemPrompt, want) {
+				t.Fatalf("role %q prompt missing UTF-8 communication rule %q", name, want)
+			}
 		}
 	}
 }

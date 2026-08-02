@@ -13,9 +13,12 @@
     const $ = (id) => document.getElementById(id);
     const dom = {
         loading:        $('loading'),
+        app:            $('app'),
         versionBadge:   $('version-badge'),
         statusText:     $('agent-status-text'),
         statusDot:      $('agent-status-dot'),
+        sidebar:        document.querySelector('.sidebar'),
+        sidebarCollapseBtn: $('sidebar-collapse-btn'),
         newSessionBtn:  $('new-session-btn'),
         sessionList:    $('session-list'),
         sessionTitle:   $('current-session-title'),
@@ -71,8 +74,14 @@
         userLogoutBtn:  $('user-logout-btn'),
         // Step 1.5 Task 4：右侧用户文件栏 DOM 引用
         projectPanel:        $('project-file-panel'),
+        projectPanelTabs:    document.querySelector('.project-panel-tabs'),
+        projectPanelTitle:   $('project-panel-title'),
+        projectNewFileBtn:   $('project-new-file-btn'),
+        projectNewFolderBtn: $('project-new-folder-btn'),
         projectRefreshBtn:   $('project-refresh-btn'),
         projectPanelCount:   $('project-panel-count'),
+        projectSettingUser:  $('project-setting-user'),
+        projectPathbar:      document.querySelector('.project-pathbar'),
         projectCurrentPath:  $('project-current-path'),
         projectBreadcrumbs:  $('project-breadcrumbs'),
         projectTruncated:    $('project-panel-truncated'),
@@ -81,6 +90,14 @@
         projectError:        $('project-panel-error'),
         projectErrorText:    $('project-panel-error-text'),
         projectFileList:     $('project-file-list'),
+        projectWorkspacePreview: $('project-workspace-preview'),
+        projectWorkspacePreviewTitle: $('project-workspace-preview-title'),
+        projectWorkspacePreviewPath:  $('project-workspace-preview-path'),
+        projectWorkspacePreviewMeta:  $('project-workspace-preview-meta'),
+        projectWorkspacePreviewSize:  $('project-workspace-preview-size'),
+        projectWorkspacePreviewType:  $('project-workspace-preview-type'),
+        projectWorkspacePreviewSave:  $('project-workspace-preview-save'),
+        projectWorkspacePreviewBody:  $('project-workspace-preview-body'),
         projectFileModal:    $('project-file-modal'),
         projectFileModalTitle: $('project-file-modal-title'),
         projectFileModalPath:  $('project-file-modal-path'),
@@ -88,6 +105,7 @@
         projectFileModalType:  $('project-file-modal-type'),
         projectFileModalLanguage: $('project-file-modal-language'),
         projectFileModalBody:  $('project-file-modal-body'),
+        projectFileModalSave:  $('project-file-modal-save'),
         projectTabButtons:     Array.from(document.querySelectorAll('[data-project-tab]')),
         projectTabPanels:      Array.from(document.querySelectorAll('[data-project-tab-panel]')),
         projectGitRefreshBtn:  $('project-git-refresh-btn'),
@@ -121,6 +139,7 @@
         wsReconnectTimer: null,
         wsMaxReconnectAttempts: 10,
         wsReconnectIntervalMs: 3000,
+        settingReconnectTimer: null,
 
         sessionId: null,
         messages: [],                  // [{ role, content, tool_call? }]  与 DOM 镜像
@@ -155,14 +174,27 @@
         // - 后续 Skill 系统注册的命令若不在内置映射表中，前端按"未知命令"兜底
         commandTypeByName: {},
         // Step 1.5 Task 4：用户文件栏目录状态。
+        projectScope: 'workspace',
         projectDirPath: '',
+        projectDirPathByScope: { workspace: '', setting: '' },
         projectDirPending: null,        // { seq, path }，用于过滤旧回包
         projectDirSeq: 0,
         projectDirEntriesCache: {},     // path -> entries
         projectDirLoading: false,
         projectFilePending: null,       // { seq, path, timer } - filters stale file preview responses
+        projectFileWritePending: null,
+        projectEntryCreatePending: null,
+        projectEntryDeletePending: null,
+        projectWorkspaceFilePending: null,
+        projectWorkspacePreviewPath: '',
+        projectWorkspacePreviewScope: 'workspace',
+        projectWorkspacePreviewFile: null,
+        projectWorkspacePreviewContent: '',
+        projectWorkspacePreviewEditing: false,
         projectFileSeq: 0,
-        projectActiveTab: 'files',
+        projectFileModalPath: '',
+        projectFileModalScope: 'workspace',
+        projectActiveTab: 'workspace',
         projectGitLoaded: false,
         projectGitPending: null,
         projectGitSeq: 0,
@@ -215,6 +247,7 @@
         if (dom.userMenuName) dom.userMenuName.textContent = nickname;
         if (dom.userMenuEmail) dom.userMenuEmail.textContent = email;
         if (dom.userMenuUID) dom.userMenuUID.textContent = uid;
+        if (state.projectActiveTab === 'setting') setProjectChrome('setting');
     }
 
     async function loadCurrentUser() {
@@ -310,6 +343,29 @@
         }
     }
 
+    const SIDEBAR_COLLAPSED_KEY = 'metaatoms-sidebar-collapsed';
+
+    function applySidebarCollapsed(collapsed) {
+        if (dom.app) dom.app.classList.toggle('is-sidebar-collapsed', !!collapsed);
+        if (dom.sidebarCollapseBtn) {
+            dom.sidebarCollapseBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+            dom.sidebarCollapseBtn.title = collapsed ? 'Expand sessions' : 'Collapse sessions';
+            dom.sidebarCollapseBtn.setAttribute('aria-label', collapsed ? 'Expand sessions' : 'Collapse sessions');
+        }
+    }
+
+    function bindSidebarCollapse() {
+        let collapsed = false;
+        try { collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'; } catch (_) {}
+        applySidebarCollapsed(collapsed);
+        if (!dom.sidebarCollapseBtn) return;
+        dom.sidebarCollapseBtn.addEventListener('click', () => {
+            const next = !dom.app?.classList.contains('is-sidebar-collapsed');
+            applySidebarCollapsed(next);
+            try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? 'true' : 'false'); } catch (_) {}
+        });
+    }
+
     const formatTime = (iso) => {
         try {
             const d = new Date(iso);
@@ -356,7 +412,7 @@
         // Connected: refresh sessions and reload the project root for this socket.
         sendWS(MsgType.ListSessions, {});
         sendWS(MsgType.GetCurrentSession, {});
-        requestProjectDir('', { force: true });
+        requestProjectDir('', { force: true, scope: state.projectScope || 'workspace' });
         if (state.projectActiveTab === 'git') {
             requestProjectGitChanges({ force: true });
         }
@@ -438,6 +494,12 @@
         ProjectDir:        'project_dir',
         ReadProjectFile:   'read_project_file',
         ProjectFile:       'project_file',
+        WriteProjectFile:  'write_project_file',
+        ProjectFileWritten:'project_file_written',
+        CreateProjectEntry:'create_project_entry',
+        ProjectEntryCreated:'project_entry_created',
+        DeleteProjectEntry:'delete_project_entry',
+        ProjectEntryDeleted:'project_entry_deleted',
         ListProjectGitChanges: 'list_project_git_changes',
         ProjectGitChanges: 'project_git_changes',
         ReadProjectGitDiff: 'read_project_git_diff',
@@ -537,6 +599,9 @@
             case MsgType.FileDiff:          return onFileDiff(msg.payload);
             case MsgType.ProjectDir:        return onProjectDir(msg.payload);
             case MsgType.ProjectFile:       return onProjectFile(msg.payload);
+            case MsgType.ProjectFileWritten:return onProjectFileWritten(msg.payload);
+            case MsgType.ProjectEntryCreated:return onProjectEntryCreated(msg.payload);
+            case MsgType.ProjectEntryDeleted:return onProjectEntryDeleted(msg.payload);
             case MsgType.ProjectGitChanges: return onProjectGitChanges(msg.payload);
             case MsgType.ProjectGitDiff:    return onProjectGitDiff(msg.payload);
             case MsgType.ProjectSearch:     return onProjectSearch(msg.payload);
@@ -633,7 +698,7 @@
             state.modelName = p.model;
             dom.modelName.textContent = p.model;
         }
-        requestProjectDir('', { skipIfCurrent: true });
+        requestProjectDir('', { skipIfCurrent: true, scope: state.projectScope || 'workspace' });
         // 高亮左侧对应会话项
         highlightActiveSession();
         // 任何"会话切换/重置"事件都会改变左侧列表的预览、消息数、更新时间等字段，
@@ -743,6 +808,7 @@
         empty_workdir: '服务端未配置用户目录，无法加载文件。',
         invalid_path: '目录路径无效，已拒绝加载。',
         outside_workdir: '目录路径超出用户目录，已拒绝加载。',
+        invalid_scope: '文件区域无效，已拒绝加载。',
         not_found: '目录不存在或已被删除。',
         not_directory: '该路径不是目录。',
         read_error: '读取目录失败，请稍后重试。',
@@ -760,23 +826,49 @@
         return p || '.';
     }
 
+    function projectCacheKey(scope, path) {
+        return `${scope || 'workspace'}:${normalizeProjectPath(path)}`;
+    }
+
+    function currentProjectScope() {
+        return state.projectActiveTab === 'setting' ? 'setting' : 'workspace';
+    }
+
+    function setProjectChrome(scope) {
+        const isSetting = scope === 'setting';
+        if (dom.projectPanelTitle) dom.projectPanelTitle.textContent = isSetting ? 'Setting' : 'Workspace';
+        if (dom.projectNewFileBtn) dom.projectNewFileBtn.hidden = !isSetting;
+        if (dom.projectNewFolderBtn) dom.projectNewFolderBtn.hidden = !isSetting;
+        if (dom.projectSettingUser) {
+            dom.projectSettingUser.hidden = !isSetting;
+            if (isSetting) {
+                const user = state.currentUser || {};
+                const name = user.nickname || '--';
+                const email = user.email || '--';
+                const uid = user.user_id || '--';
+                dom.projectSettingUser.textContent = `${name} · ${email} · ${uid}`;
+            }
+        }
+    }
+
     function requestProjectDir(path, options = {}) {
+        const scope = options.scope || currentProjectScope();
         const target = normalizeProjectPath(path);
         if (!dom.projectPanel) return;
         const force = !!options.force;
         const skipIfCurrent = !!options.skipIfCurrent;
-        if (!force && state.projectDirPending && state.projectDirPending.path === target) {
+        if (!force && state.projectDirPending && state.projectDirPending.path === target && state.projectDirPending.scope === scope) {
             return;
         }
-        if (skipIfCurrent && !state.projectDirPending && normalizeProjectPath(state.projectDirPath) === target && state.projectDirEntriesCache[target]) {
+        if (skipIfCurrent && !state.projectDirPending && state.projectScope === scope && normalizeProjectPath(state.projectDirPath) === target && state.projectDirEntriesCache[projectCacheKey(scope, target)]) {
             return;
         }
         const seq = state.projectDirSeq + 1;
         state.projectDirSeq = seq;
         const requestId = `dir-${seq}`;
-        state.projectDirPending = { seq, path: target, requestId };
+        state.projectDirPending = { seq, path: target, scope, requestId };
         setProjectDirLoading(true);
-        const sent = sendWS(MsgType.ListProjectDir, { path: target, request_id: requestId });
+        const sent = sendWS(MsgType.ListProjectDir, { path: target, scope, request_id: requestId });
         if (!sent) {
             state.projectDirPending = null;
             setProjectDirLoading(false);
@@ -787,12 +879,14 @@
     function onProjectDir(p) {
         if (!p) return;
         const responsePath = normalizeProjectPath(p.path);
+        const responseScope = p.scope || state.projectScope || 'workspace';
         const responseRequestId = String(p.request_id || '');
         const pending = state.projectDirPending;
         if (pending) {
             if (responsePath !== pending.path) return;
+            if (responseScope !== pending.scope) return;
             if (responseRequestId && pending.requestId && responseRequestId !== pending.requestId) return;
-        } else if (responsePath !== normalizeProjectPath(state.projectDirPath)) {
+        } else if (responseScope !== state.projectScope || responsePath !== normalizeProjectPath(state.projectDirPath)) {
             return;
         }
         state.projectDirPending = null;
@@ -804,8 +898,11 @@
         }
 
         const entries = Array.isArray(p.entries) ? p.entries : [];
+        state.projectScope = responseScope;
         state.projectDirPath = responsePath;
-        state.projectDirEntriesCache[responsePath] = entries;
+        state.projectDirPathByScope[responseScope] = responsePath;
+        state.projectDirEntriesCache[projectCacheKey(responseScope, responsePath)] = entries;
+        setProjectChrome(responseScope);
         renderProjectPathbar(responsePath, Array.isArray(p.breadcrumbs) ? p.breadcrumbs : []);
         renderProjectCount(entries.length, !!p.truncated);
         if (dom.projectTruncated) {
@@ -821,9 +918,36 @@
         if (!p) return;
         const file = p.file || {};
         const responsePath = normalizeProjectPath(file.path || p.path);
+        const responseScope = p.scope || state.projectWorkspaceFilePending?.scope || state.projectFilePending?.scope || state.projectScope || 'workspace';
         const responseRequestId = String(p.request_id || '');
+        const workspacePending = state.projectWorkspaceFilePending;
+        if (workspacePending && responsePath === workspacePending.path && responseScope === workspacePending.scope) {
+            if (responseRequestId && workspacePending.requestId && responseRequestId !== workspacePending.requestId) return;
+            clearProjectWorkspaceFilePending();
+            state.projectWorkspacePreviewPath = responsePath;
+            updateWorkspacePreviewMeta(file, p.reason);
+            markWorkspacePreviewSelection(responsePath);
+            if (p.ok !== true) {
+                if (responseScope === 'setting' && p.reason === 'not_found') {
+                    renderWorkspaceSettingEditor('');
+                    return;
+                }
+                renderWorkspacePreviewUnavailable(p.reason, file);
+                return;
+            }
+            if (responseScope === 'setting') {
+                renderWorkspaceSettingContent(file, p.content || '');
+                return;
+            }
+            if (dom.projectWorkspacePreviewSave) dom.projectWorkspacePreviewSave.hidden = true;
+            renderProjectContentInto(dom.projectWorkspacePreviewBody, file, p.content || '');
+            return;
+        }
         const pending = state.projectFilePending;
         if (!pending || responsePath !== pending.path) {
+            return;
+        }
+        if (responseScope !== pending.scope) {
             return;
         }
         if (responseRequestId && pending.requestId && responseRequestId !== pending.requestId) {
@@ -831,8 +955,14 @@
         }
         clearProjectFilePending();
 
+        state.projectFileModalScope = pending.scope || p.scope || state.projectScope || 'workspace';
+        state.projectFileModalPath = responsePath;
         updateProjectFileModalMeta(file, p.reason);
         if (p.ok !== true) {
+            if (state.projectFileModalScope === 'setting' && p.reason === 'not_found') {
+                renderProjectFileEditor('');
+                return;
+            }
             renderProjectFileUnavailable(p.reason, file);
             return;
         }
@@ -870,20 +1000,23 @@
 
     function renderProjectPathbar(path, breadcrumbs) {
         const current = displayProjectPath(path);
+        const atRoot = current === '.';
+        if (dom.projectPathbar) dom.projectPathbar.hidden = atRoot;
         if (dom.projectCurrentPath) {
             dom.projectCurrentPath.textContent = current;
-            dom.projectCurrentPath.title = current === '.' ? '用户目录' : current;
+            dom.projectCurrentPath.title = current === '.' ? state.projectScope : current;
         }
         if (!dom.projectBreadcrumbs) return;
         dom.projectBreadcrumbs.innerHTML = '';
-        const crumbs = breadcrumbs.length > 0 ? breadcrumbs : [{ name: 'root', path: '' }];
+        const rootName = state.projectScope === 'setting' ? 'setting' : 'workspace';
+        const crumbs = breadcrumbs.length > 0 ? breadcrumbs : [{ name: rootName, path: '' }];
         crumbs.forEach((crumb, index) => {
             const crumbPath = normalizeProjectPath(crumb.path);
             const btn = document.createElement('button');
             btn.className = 'project-crumb';
             if (index === crumbs.length - 1) btn.classList.add('is-active');
             btn.type = 'button';
-            btn.textContent = crumb.name || (crumbPath ? crumbPath.split('/').pop() : 'root');
+            btn.textContent = crumbPath ? (crumb.name || crumbPath.split('/').pop()) : rootName;
             btn.title = displayProjectPath(crumbPath);
             btn.addEventListener('click', () => requestProjectDir(crumbPath));
             dom.projectBreadcrumbs.appendChild(btn);
@@ -896,8 +1029,16 @@
         dom.projectPanelCount.textContent = truncated ? `${n}+` : String(n);
     }
 
+    function isWorkspaceProjectOpen() {
+        return state.projectScope === 'workspace' || state.projectScope === 'setting';
+    }
+
     function renderProjectFileList(entries, parentPath) {
         if (!dom.projectFileList) return;
+        const projectOpen = isWorkspaceProjectOpen();
+        if (dom.projectPanel) dom.projectPanel.classList.toggle('is-workspace-project', projectOpen);
+        if (dom.app) dom.app.classList.toggle('is-workspace-project-open', projectOpen);
+        if (dom.projectWorkspacePreview) dom.projectWorkspacePreview.hidden = !projectOpen;
         dom.projectFileList.innerHTML = '';
         if (state.projectDirPath) {
             dom.projectFileList.appendChild(buildProjectParentItem(parentPath));
@@ -905,6 +1046,11 @@
         entries.forEach(entry => {
             dom.projectFileList.appendChild(buildProjectEntryItem(entry));
         });
+        if (projectOpen) {
+            maybeOpenFirstWorkspaceFile(entries);
+        } else {
+            clearWorkspacePreview();
+        }
     }
 
     function buildProjectParentItem(parentPath) {
@@ -930,6 +1076,59 @@
         return btn;
     }
 
+    function buildWorkspaceDownloadButton(path) {
+        const action = document.createElement('span');
+        action.className = 'project-file-download';
+        action.setAttribute('role', 'button');
+        action.setAttribute('tabindex', '0');
+        action.title = 'Download project zip';
+        action.setAttribute('aria-label', 'Download project zip');
+        action.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>';
+        const download = (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (!path) return;
+            window.location.href = `/api/workspace/download?path=${encodeURIComponent(path)}`;
+        };
+        action.addEventListener('click', download);
+        action.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') download(ev);
+        });
+        return action;
+    }
+
+    function isProtectedSettingEntry(path) {
+        const p = normalizeProjectPath(path);
+        return p === 'setting.json' || p === 'skills' || p === 'agents' || p === 'memory';
+    }
+
+    function canDeleteSettingEntry(entry) {
+        const path = normalizeProjectPath(entry?.path);
+        return state.projectScope === 'setting' && !!path && !isProtectedSettingEntry(path);
+    }
+
+    function buildSettingDeleteButton(entry) {
+        const isDir = entry?.type === 'directory';
+        const path = normalizeProjectPath(entry?.path);
+        const action = document.createElement('span');
+        action.className = 'project-file-action project-file-delete';
+        action.setAttribute('role', 'button');
+        action.setAttribute('tabindex', '0');
+        action.title = isDir ? 'Delete folder' : 'Delete file';
+        action.setAttribute('aria-label', isDir ? 'Delete folder' : 'Delete file');
+        action.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+        const remove = (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            deleteProjectSettingEntry(path, isDir ? 'directory' : 'file');
+        };
+        action.addEventListener('click', remove);
+        action.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') remove(ev);
+        });
+        return action;
+    }
+
     function buildProjectEntryItem(entry) {
         const isDir = entry && entry.type === 'directory';
         const path = normalizeProjectPath(entry?.path);
@@ -938,14 +1137,22 @@
         btn.className = `project-file-item ${isDir ? 'is-directory' : 'is-file'}`;
         if (!isDir && entry && entry.previewable === false) btn.classList.add('is-unpreviewable');
         btn.title = path || entry?.name || '';
+        btn.dataset.path = path;
         btn.setAttribute('role', 'listitem');
         btn.addEventListener('click', () => {
             if (isDir) {
                 requestProjectDir(path);
                 return;
             }
+            if (isWorkspaceProjectOpen()) {
+                openProjectWorkspaceFile(path);
+                return;
+            }
             openProjectFileModal(path);
         });
+        if (!isDir && isWorkspaceProjectOpen() && state.projectWorkspacePreviewScope === state.projectScope && normalizeProjectPath(state.projectWorkspacePreviewPath) === path) {
+            btn.classList.add('is-selected');
+        }
         btn.appendChild(buildProjectIcon(isDir ? 'D' : 'F'));
 
         const main = document.createElement('span');
@@ -960,6 +1167,11 @@
         main.appendChild(name);
         main.appendChild(meta);
         btn.appendChild(main);
+        if (state.projectScope === 'workspace' && !state.projectDirPath && isDir) {
+            btn.appendChild(buildWorkspaceDownloadButton(path));
+        } else if (canDeleteSettingEntry(entry)) {
+            btn.appendChild(buildSettingDeleteButton(entry));
+        }
         return btn;
     }
 
@@ -1003,10 +1215,14 @@
     }
 
     const PROJECT_FILE_REASON_TEXT = {
+        invalid_json: 'setting.json JSON invalid. Fix it and save again.',
+        already_exists: '同名文件或目录已存在。',
         empty_workdir: '服务端未配置用户目录，无法读取文件。',
         invalid_payload: '文件读取请求格式无效。',
         invalid_path: '文件路径无效，已拒绝读取。',
         outside_workdir: '文件路径超出用户目录，已拒绝读取。',
+        invalid_scope: '文件区域无效，已拒绝读取。',
+        write_denied: '该区域不支持编辑。',
         not_found: '文件不存在或已被删除。',
         is_directory: '这是一个目录，不能作为文件预览。',
         binary: '二进制文件暂不支持预览。',
@@ -1016,7 +1232,7 @@
     };
 
     function setProjectTab(tab, options = {}) {
-        const next = ['files', 'git', 'search'].includes(tab) ? tab : 'files';
+        const next = ['workspace', 'setting'].includes(tab) ? tab : 'workspace';
         state.projectActiveTab = next;
         dom.projectTabButtons.forEach(btn => {
             const active = (btn.dataset.projectTab || '') === next;
@@ -1025,20 +1241,24 @@
             btn.tabIndex = active ? 0 : -1;
         });
         dom.projectTabPanels.forEach(panel => {
-            const active = (panel.dataset.projectTabPanel || '') === next;
+            const panelName = panel.dataset.projectTabPanel || '';
+            const active = panelName === 'browser';
             panel.hidden = !active;
             panel.classList.toggle('is-active', active);
         });
+        const scope = next;
+        const path = scope === 'workspace' ? '' : (state.projectDirPathByScope[scope] || '');
+        if (scope === 'workspace') state.projectDirPathByScope.workspace = '';
+        state.projectScope = scope;
+        state.projectDirPath = path;
+        setProjectChrome(scope);
+        if (dom.projectPanel) dom.projectPanel.classList.toggle('is-workspace-project', true);
+        if (dom.app) dom.app.classList.toggle('is-workspace-project-open', true);
+        if (dom.projectWorkspacePreview) dom.projectWorkspacePreview.hidden = false;
+        if (state.projectWorkspacePreviewScope !== scope) clearWorkspacePreview();
+        renderProjectPathbar(path, []);
         if (options.noLoad) return;
-        if (next === 'files') {
-            if (!state.projectDirLoading && !state.projectDirEntriesCache[state.projectDirPath || '']) {
-                requestProjectDir(state.projectDirPath || '', { force: true });
-            }
-            return;
-        }
-        if (next === 'git' && (!state.projectGitLoaded || options.force)) {
-            requestProjectGitChanges({ force: options.force });
-        }
+        requestProjectDir(path, { force: true, scope });
     }
 
     function requestProjectGitChanges(options = {}) {
@@ -1258,7 +1478,7 @@
         const requestId = `search-${seq}`;
         state.projectSearchPending = { seq, requestId };
         setProjectSearchLoading(true);
-        const payload = { query, path, regex, exclude, request_id: requestId };
+        const payload = { query, path, regex, exclude, scope: 'workspace', request_id: requestId };
         if (!sendWS(MsgType.SearchProject, payload)) {
             state.projectSearchPending = null;
             setProjectSearchLoading(false);
@@ -1322,7 +1542,7 @@
         header.addEventListener('click', () => openProjectFileModal(filePath));
         wrap.appendChild(header);
 
-        const matches = Array.isArray(file?.matches) ? file.matches : [];
+        const matches = Array.isArray(file?.lines) ? file.lines : (Array.isArray(file?.matches) ? file.matches : []);
         matches.forEach(match => {
             const line = document.createElement('button');
             line.type = 'button';
@@ -1333,7 +1553,7 @@
             lineNo.textContent = String(match?.line || '');
             const snippet = document.createElement('span');
             snippet.className = 'project-search-snippet';
-            snippet.textContent = match?.snippet || match?.text || '';
+            snippet.textContent = match?.summary || match?.snippet || match?.text || '';
             line.appendChild(lineNo);
             line.appendChild(snippet);
             wrap.appendChild(line);
@@ -1353,6 +1573,7 @@
             empty_workdir: 'User directory is not configured.',
             invalid_payload: 'Invalid search request.',
             empty_query: 'Enter a search query.',
+            invalid_scope: 'Invalid search scope.',
             invalid_path: 'Invalid search path.',
             outside_workdir: 'Search path is outside the user directory.',
             invalid_regex: 'Invalid regular expression.',
@@ -1370,12 +1591,181 @@
         }
         state.projectGitDiffPending = null;
         state.projectSearchPending = null;
+        state.projectEntryCreatePending = null;
+        state.projectEntryDeletePending = null;
+        clearProjectWorkspaceFilePending();
         setProjectGitLoading(false);
         setProjectSearchLoading(false);
     }
+
+    function clearProjectWorkspaceFilePending() {
+        if (state.projectWorkspaceFilePending?.timer) {
+            clearTimeout(state.projectWorkspaceFilePending.timer);
+        }
+        state.projectWorkspaceFilePending = null;
+    }
+
+    function maybeOpenFirstWorkspaceFile(entries) {
+        const files = Array.isArray(entries) ? entries.filter(entry => entry?.type !== 'directory') : [];
+        const selected = normalizeProjectPath(state.projectWorkspacePreviewPath);
+        if (selected && state.projectWorkspacePreviewScope === state.projectScope && files.some(entry => normalizeProjectPath(entry.path) === selected)) {
+            markWorkspacePreviewSelection(selected);
+            return;
+        }
+        const firstPreviewable = files.find(entry => entry.previewable !== false) || files[0];
+        if (firstPreviewable) {
+            openProjectWorkspaceFile(firstPreviewable.path);
+            return;
+        }
+        state.projectWorkspacePreviewPath = '';
+        renderWorkspacePreviewState('placeholder', 'Select a file to preview.');
+    }
+
+    function openProjectWorkspaceFile(path) {
+        const filePath = normalizeProjectPath(path);
+        if (!dom.projectWorkspacePreview || !filePath) return;
+        const scope = state.projectScope || currentProjectScope();
+        clearProjectWorkspaceFilePending();
+        state.projectWorkspacePreviewPath = filePath;
+        state.projectWorkspacePreviewScope = scope;
+        markWorkspacePreviewSelection(filePath);
+        const seq = state.projectFileSeq + 1;
+        state.projectFileSeq = seq;
+        const requestId = `preview-file-${seq}`;
+        const timer = setTimeout(() => {
+            const pending = state.projectWorkspaceFilePending;
+            if (!pending || pending.requestId !== requestId) return;
+            clearProjectWorkspaceFilePending();
+            renderWorkspacePreviewState('error', 'File preview timed out. Try again.');
+        }, 15000);
+        state.projectWorkspaceFilePending = { seq, path: filePath, scope, requestId, timer };
+        updateWorkspacePreviewMeta({ path: filePath, name: projectFileNameFromPath(filePath) }, 'loading');
+        renderWorkspacePreviewState('loading', 'Loading file...');
+        const sent = sendWS(MsgType.ReadProjectFile, { path: filePath, scope, request_id: requestId });
+        if (!sent) {
+            clearProjectWorkspaceFilePending();
+            renderWorkspacePreviewState('error', 'WebSocket is disconnected. Reconnect and retry.');
+        }
+    }
+
+    function clearWorkspacePreview() {
+        clearProjectWorkspaceFilePending();
+        state.projectWorkspacePreviewPath = '';
+        state.projectWorkspacePreviewScope = state.projectScope || 'workspace';
+        state.projectWorkspacePreviewFile = null;
+        state.projectWorkspacePreviewContent = '';
+        state.projectWorkspacePreviewEditing = false;
+        updateWorkspacePreviewMeta({}, '');
+        if (dom.projectWorkspacePreviewSave) dom.projectWorkspacePreviewSave.hidden = true;
+        renderWorkspacePreviewState('placeholder', 'Select a file to preview.');
+    }
+
+    function updateWorkspacePreviewMeta(file, reason) {
+        const filePath = normalizeProjectPath(file?.path);
+        const name = file?.name || projectFileNameFromPath(filePath) || 'Select a file';
+        const renderType = file?.render_type || (reason === 'loading' ? 'loading' : '--');
+        if (dom.projectWorkspacePreviewTitle) dom.projectWorkspacePreviewTitle.textContent = name;
+        if (dom.projectWorkspacePreviewPath) {
+            const displayPath = filePath || '--';
+            dom.projectWorkspacePreviewPath.textContent = displayPath;
+            dom.projectWorkspacePreviewPath.title = displayPath;
+        }
+        if (dom.projectWorkspacePreviewSize) dom.projectWorkspacePreviewSize.textContent = Number.isFinite(Number(file?.size)) ? formatProjectFileSize(file.size) : '--';
+        if (dom.projectWorkspacePreviewType) dom.projectWorkspacePreviewType.textContent = renderType || '--';
+    }
+
+    function renderWorkspacePreviewUnavailable(reason, file) {
+        updateWorkspacePreviewMeta(file || {}, reason);
+        renderWorkspacePreviewState(reason === 'too_large' || reason === 'binary' || reason === 'not_previewable' ? 'unpreviewable' : 'error', projectFileReasonText(reason));
+    }
+
+    function renderWorkspacePreviewState(kind, message) {
+        if (dom.projectWorkspacePreviewSave) dom.projectWorkspacePreviewSave.hidden = true;
+        renderProjectStateInto(dom.projectWorkspacePreviewBody, kind, message);
+    }
+
+    function shouldRenderSettingFile(file) {
+        const renderType = String(file?.render_type || '').toLowerCase();
+        return renderType === 'markdown' || renderType === 'json' || renderType === 'xml' || renderType === 'code';
+    }
+
+    function renderWorkspaceSettingContent(file, content) {
+        state.projectWorkspacePreviewFile = file || null;
+        state.projectWorkspacePreviewContent = content || '';
+        state.projectWorkspacePreviewEditing = false;
+        if (!shouldRenderSettingFile(file)) {
+            renderWorkspaceSettingEditor(content || '');
+            return;
+        }
+        renderProjectContentInto(dom.projectWorkspacePreviewBody, file, content || '');
+        if (dom.projectWorkspacePreviewSave) {
+            dom.projectWorkspacePreviewSave.hidden = false;
+            dom.projectWorkspacePreviewSave.disabled = false;
+            dom.projectWorkspacePreviewSave.textContent = 'Edit';
+        }
+    }
+
+    function renderWorkspaceSettingEditor(content) {
+        if (!dom.projectWorkspacePreviewBody) return;
+        state.projectWorkspacePreviewContent = content || '';
+        state.projectWorkspacePreviewEditing = true;
+        const textarea = document.createElement('textarea');
+        textarea.className = 'project-file-editor';
+        textarea.spellcheck = false;
+        textarea.value = content || '';
+        dom.projectWorkspacePreviewBody.innerHTML = '';
+        dom.projectWorkspacePreviewBody.appendChild(textarea);
+        if (dom.projectWorkspacePreviewSave) {
+            dom.projectWorkspacePreviewSave.hidden = false;
+            dom.projectWorkspacePreviewSave.disabled = false;
+            dom.projectWorkspacePreviewSave.textContent = 'Save';
+        }
+        textarea.focus({ preventScroll: true });
+    }
+
+    function saveWorkspaceSettingFile() {
+        if (state.projectWorkspacePreviewScope !== 'setting' || !state.projectWorkspacePreviewPath) return;
+        const editor = dom.projectWorkspacePreviewBody?.querySelector('.project-file-editor');
+        if (!editor) {
+            renderWorkspaceSettingEditor(state.projectWorkspacePreviewContent || '');
+            return;
+        }
+        const seq = state.projectFileSeq + 1;
+        state.projectFileSeq = seq;
+        const requestId = `preview-write-${seq}`;
+        state.projectFileWritePending = { requestId, path: state.projectWorkspacePreviewPath, scope: 'setting', target: 'preview' };
+        if (dom.projectWorkspacePreviewSave) {
+            dom.projectWorkspacePreviewSave.disabled = true;
+            dom.projectWorkspacePreviewSave.textContent = 'Saving...';
+        }
+        const sent = sendWS(MsgType.WriteProjectFile, {
+            scope: 'setting',
+            path: state.projectWorkspacePreviewPath,
+            content: editor.value,
+            request_id: requestId,
+        });
+        if (!sent) {
+            state.projectFileWritePending = null;
+            if (dom.projectWorkspacePreviewSave) {
+                dom.projectWorkspacePreviewSave.disabled = false;
+                dom.projectWorkspacePreviewSave.textContent = 'Save';
+            }
+            renderWorkspacePreviewState('error', 'WebSocket is disconnected. Reconnect and retry.');
+        }
+    }
+
+    function markWorkspacePreviewSelection(path) {
+        if (!dom.projectFileList) return;
+        const selected = normalizeProjectPath(path);
+        dom.projectFileList.querySelectorAll('.project-file-item.is-file').forEach(item => {
+            item.classList.toggle('is-selected', normalizeProjectPath(item.dataset.path) === selected);
+        });
+    }
+
     function openProjectFileModal(path) {
         const filePath = normalizeProjectPath(path);
         if (!dom.projectFileModal || !filePath) return;
+        const scope = currentProjectScope();
         clearProjectFilePending();
 
         const seq = state.projectFileSeq + 1;
@@ -1387,14 +1777,16 @@
             clearProjectFilePending();
             renderProjectFileState('error', '读取文件超时，请稍后重试。');
         }, 15000);
-        state.projectFilePending = { seq, path: filePath, requestId, timer };
+        state.projectFilePending = { seq, path: filePath, scope, requestId, timer };
+        state.projectFileModalScope = scope;
+        state.projectFileModalPath = filePath;
 
         updateProjectFileModalMeta({ path: filePath, name: projectFileNameFromPath(filePath) }, 'loading');
         renderProjectFileState('loading', '正在读取文件...');
         dom.projectFileModal.hidden = false;
         if (dom.projectFileModalBody) dom.projectFileModalBody.focus({ preventScroll: true });
 
-        const sent = sendWS(MsgType.ReadProjectFile, { path: filePath, request_id: requestId });
+        const sent = sendWS(MsgType.ReadProjectFile, { path: filePath, scope, request_id: requestId });
         if (!sent) {
             clearProjectFilePending();
             renderProjectFileState('error', 'WebSocket 未连接，无法读取文件。');
@@ -1403,6 +1795,7 @@
 
     function closeProjectFileModal() {
         clearProjectFilePending();
+        state.projectFileWritePending = null;
         if (dom.projectFileModal) dom.projectFileModal.hidden = true;
     }
 
@@ -1419,6 +1812,259 @@
             clearTimeout(state.projectFilePending.timer);
         }
         state.projectFilePending = null;
+    }
+
+    function saveProjectSettingFile() {
+        if (state.projectFileModalScope !== 'setting' || !state.projectFileModalPath) return;
+        const editor = dom.projectFileModalBody?.querySelector('.project-file-editor');
+        if (!editor) return;
+        const seq = state.projectFileSeq + 1;
+        state.projectFileSeq = seq;
+        const requestId = `file-write-${seq}`;
+        state.projectFileWritePending = { requestId, path: state.projectFileModalPath, scope: 'setting' };
+        if (dom.projectFileModalSave) {
+            dom.projectFileModalSave.disabled = true;
+            dom.projectFileModalSave.textContent = 'Saving...';
+        }
+        const sent = sendWS(MsgType.WriteProjectFile, {
+            scope: 'setting',
+            path: state.projectFileModalPath,
+            content: editor.value,
+            request_id: requestId,
+        });
+        if (!sent) {
+            state.projectFileWritePending = null;
+            if (dom.projectFileModalSave) {
+                dom.projectFileModalSave.disabled = false;
+                dom.projectFileModalSave.textContent = 'Save';
+            }
+            renderProjectFileState('error', 'WebSocket 未连接，无法保存文件。');
+        }
+    }
+
+    function reconnectAfterSettingSave() {
+        if (state.settingReconnectTimer) return;
+        state.settingReconnectTimer = setTimeout(() => {
+            state.settingReconnectTimer = null;
+            const ws = state.ws;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close(1000, 'setting_saved');
+                return;
+            }
+            scheduleReconnect();
+        }, 350);
+    }
+
+    function onProjectFileWritten(p) {
+        const pending = state.projectFileWritePending;
+        if (pending && p?.request_id && p.request_id !== pending.requestId) return;
+        state.projectFileWritePending = null;
+        if (pending?.target === 'preview') {
+            if (dom.projectWorkspacePreviewSave) {
+                dom.projectWorkspacePreviewSave.disabled = false;
+                dom.projectWorkspacePreviewSave.textContent = 'Save';
+            }
+            const file = p?.file || {};
+            const filePath = normalizeProjectPath(file.path || pending.path || state.projectWorkspacePreviewPath);
+            state.projectWorkspacePreviewScope = p?.scope || 'setting';
+            state.projectWorkspacePreviewPath = filePath;
+            updateWorkspacePreviewMeta(file.path ? file : { path: filePath, name: projectFileNameFromPath(filePath) }, p?.reason);
+            if (!p || p.ok !== true) {
+                if (p?.reason === 'invalid_json') {
+                    if (dom.projectWorkspacePreviewSave) {
+                        dom.projectWorkspacePreviewSave.hidden = false;
+                        dom.projectWorkspacePreviewSave.disabled = false;
+                        dom.projectWorkspacePreviewSave.textContent = 'Save';
+                    }
+                    showCompactionToast('setting.json JSON invalid. Fix it and save again.', 'error');
+                    return;
+                }
+                renderWorkspacePreviewUnavailable(p?.reason || 'read_error', file);
+                return;
+            }
+            renderWorkspaceSettingContent(file.path ? file : { path: filePath, name: projectFileNameFromPath(filePath), render_type: 'plain', language: 'plain', size: 0 }, p.content || '');
+            if (dom.projectWorkspacePreviewSave) {
+                const resetText = shouldRenderSettingFile(file) ? 'Edit' : 'Save';
+                dom.projectWorkspacePreviewSave.textContent = 'Saved';
+                setTimeout(() => {
+                    if (dom.projectWorkspacePreviewSave && !dom.projectWorkspacePreviewSave.disabled) {
+                        dom.projectWorkspacePreviewSave.textContent = resetText;
+                    }
+                }, 1400);
+            }
+            requestProjectDir(state.projectDirPathByScope.setting || state.projectDirPath || '', { scope: 'setting', force: true });
+            showCompactionToast('Setting file saved. Reconnecting...', 'info');
+            reconnectAfterSettingSave();
+            return;
+        }
+        if (dom.projectFileModalSave) {
+            dom.projectFileModalSave.disabled = false;
+            dom.projectFileModalSave.textContent = 'Save';
+        }
+        const file = p?.file || {};
+        const filePath = normalizeProjectPath(file.path || pending?.path || state.projectFileModalPath);
+        state.projectFileModalScope = p?.scope || 'setting';
+        state.projectFileModalPath = filePath;
+        updateProjectFileModalMeta(file.path ? file : { path: filePath, name: projectFileNameFromPath(filePath) }, p?.reason);
+        if (!p || p.ok !== true) {
+            renderProjectFileUnavailable(p?.reason || 'read_error', file);
+            return;
+        }
+        renderProjectFileEditor(p.content || '');
+        if (dom.projectFileModalSave) {
+            dom.projectFileModalSave.textContent = 'Saved';
+            setTimeout(() => {
+                if (dom.projectFileModalSave && !dom.projectFileModalSave.disabled) {
+                    dom.projectFileModalSave.textContent = 'Save';
+                }
+            }, 1400);
+        }
+        requestProjectDir(state.projectDirPathByScope.setting || state.projectDirPath || '', { scope: 'setting', force: true });
+        showCompactionToast('Setting file saved. Reconnecting...', 'info');
+        reconnectAfterSettingSave();
+    }
+
+    function createProjectSettingEntry(kind, path) {
+        const entryKind = kind === 'directory' ? 'directory' : 'file';
+        const entryPath = normalizeProjectPath(path);
+        if (!entryPath) return;
+        const seq = state.projectFileSeq + 1;
+        state.projectFileSeq = seq;
+        const requestId = `entry-create-${seq}`;
+        state.projectEntryCreatePending = { requestId, path: entryPath, scope: 'setting', kind: entryKind };
+        if (dom.projectNewFileBtn) dom.projectNewFileBtn.disabled = true;
+        if (dom.projectNewFolderBtn) dom.projectNewFolderBtn.disabled = true;
+        const sent = sendWS(MsgType.CreateProjectEntry, {
+            scope: 'setting',
+            kind: entryKind,
+            path: entryPath,
+            request_id: requestId,
+        });
+        if (!sent) {
+            state.projectEntryCreatePending = null;
+            if (dom.projectNewFileBtn) dom.projectNewFileBtn.disabled = false;
+            if (dom.projectNewFolderBtn) dom.projectNewFolderBtn.disabled = false;
+            showCompactionToast('WebSocket is disconnected. Reconnect and retry.', 'error');
+        }
+    }
+
+    function onProjectEntryCreated(p) {
+        const pending = state.projectEntryCreatePending;
+        if (pending && p?.request_id && p.request_id !== pending.requestId) return;
+        state.projectEntryCreatePending = null;
+        if (dom.projectNewFileBtn) dom.projectNewFileBtn.disabled = false;
+        if (dom.projectNewFolderBtn) dom.projectNewFolderBtn.disabled = false;
+
+        const file = p?.file || {};
+        const filePath = normalizeProjectPath(file.path || pending?.path || '');
+        if (!p || p.ok !== true) {
+            showCompactionToast(projectFileReasonText(p?.reason || 'read_error'), 'error');
+            return;
+        }
+
+        const parentPath = normalizeProjectPath(filePath.split('/').slice(0, -1).join('/'));
+        requestProjectDir(parentPath || state.projectDirPathByScope.setting || state.projectDirPath || '', { scope: 'setting', force: true });
+        if ((file.type || pending?.kind) === 'directory') {
+            showCompactionToast('Setting directory created.', 'info');
+            return;
+        }
+
+        state.projectWorkspacePreviewScope = 'setting';
+        state.projectWorkspacePreviewPath = filePath;
+        state.projectWorkspacePreviewFile = file.path ? file : null;
+        state.projectWorkspacePreviewContent = p.content || '';
+        if (dom.projectWorkspacePreview) dom.projectWorkspacePreview.hidden = false;
+        updateWorkspacePreviewMeta(file.path ? file : { path: filePath, name: projectFileNameFromPath(filePath), render_type: 'plain', language: 'plain', size: 0 }, '');
+        renderWorkspaceSettingEditor(p.content || '');
+        markWorkspacePreviewSelection(filePath);
+        showCompactionToast('Setting file created.', 'info');
+    }
+
+    function deleteProjectSettingEntry(path, kind) {
+        const target = { path: normalizeProjectPath(path), kind: kind === 'directory' ? 'directory' : 'file' };
+        if (!target?.path) {
+            showCompactionToast('Select an item before deleting.', 'error');
+            return;
+        }
+        if (isProtectedSettingEntry(target.path)) {
+            showCompactionToast('This setting entry cannot be deleted.', 'error');
+            return;
+        }
+        const label = target.kind === 'directory' ? 'folder and all contents' : 'file';
+        const ok = window.confirm(`Delete ${label} "${target.path}"?`);
+        if (!ok) return;
+        const seq = state.projectFileSeq + 1;
+        state.projectFileSeq = seq;
+        const requestId = `entry-delete-${seq}`;
+        state.projectEntryDeletePending = { requestId, path: target.path, scope: 'setting', kind: target.kind };
+        const sent = sendWS(MsgType.DeleteProjectEntry, {
+            scope: 'setting',
+            path: target.path,
+            request_id: requestId,
+        });
+        if (!sent) {
+            state.projectEntryDeletePending = null;
+            showCompactionToast('WebSocket is disconnected. Reconnect and retry.', 'error');
+        }
+    }
+
+    function onProjectEntryDeleted(p) {
+        const pending = state.projectEntryDeletePending;
+        if (pending && p?.request_id && p.request_id !== pending.requestId) return;
+        state.projectEntryDeletePending = null;
+
+        const file = p?.file || {};
+        const deletedPath = normalizeProjectPath(file.path || pending?.path || '');
+        if (!p || p.ok !== true) {
+            showCompactionToast(projectFileReasonText(p?.reason || 'read_error'), 'error');
+            return;
+        }
+
+        const selectedPath = normalizeProjectPath(state.projectWorkspacePreviewPath);
+        if (selectedPath === deletedPath || selectedPath.startsWith(`${deletedPath}/`)) {
+            clearProjectWorkspaceFilePending();
+            state.projectWorkspacePreviewPath = '';
+            state.projectWorkspacePreviewFile = null;
+            state.projectWorkspacePreviewContent = '';
+            state.projectWorkspacePreviewEditing = false;
+            renderWorkspacePreviewState('placeholder', 'Select a file to preview.');
+        }
+
+        const parentPath = normalizeProjectPath(deletedPath.split('/').slice(0, -1).join('/'));
+        requestProjectDir(parentPath || '', { scope: 'setting', force: true });
+        showCompactionToast(`${file.type === 'directory' ? 'Setting directory' : 'Setting file'} deleted.`, 'info');
+    }
+
+    function suggestedProjectSettingEntryPath(kind) {
+        const base = normalizeProjectPath(state.projectDirPathByScope.setting || state.projectDirPath || '');
+        if (!base) {
+            return kind === 'directory' ? 'skills/new-skill' : 'skills/new-skill/SKILL.md';
+        }
+        if (kind === 'directory') {
+            return `${base}/new-folder`;
+        }
+        if (base === 'skills') {
+            return 'skills/new-skill/SKILL.md';
+        }
+        return `${base}/new-file.md`;
+    }
+
+    function newProjectSettingEntry(kind) {
+        if (state.projectActiveTab !== 'setting') return;
+        const entryKind = kind === 'directory' ? 'directory' : 'file';
+        const input = window.prompt(entryKind === 'directory' ? 'New folder path' : 'New file path', suggestedProjectSettingEntryPath(entryKind));
+        if (input === null) return;
+        const filePath = normalizeProjectPath(input);
+        if (!filePath) return;
+        createProjectSettingEntry(entryKind, filePath);
+    }
+
+    function newProjectSettingFile() {
+        newProjectSettingEntry('file');
+    }
+
+    function newProjectSettingDirectory() {
+        newProjectSettingEntry('directory');
     }
 
     function updateProjectFileModalMeta(file, reason) {
@@ -1446,30 +2092,55 @@
 
     function renderProjectFileContent(file, content) {
         if (!dom.projectFileModalBody) return;
+        if (state.projectFileModalScope === 'setting') {
+            renderProjectFileEditor(content);
+            return;
+        }
+        if (dom.projectFileModalSave) dom.projectFileModalSave.hidden = true;
+        renderProjectContentInto(dom.projectFileModalBody, file, content);
+    }
+
+    function renderProjectContentInto(container, file, content) {
+        if (!container) return;
         const renderType = String(file?.render_type || 'plain').toLowerCase();
         const language = String(file?.language || '').toLowerCase();
         if (renderType === 'binary') {
-            renderProjectFileUnavailable('binary', file);
+            renderProjectStateInto(container, 'unpreviewable', projectFileReasonText('binary'));
             return;
         }
         if (renderType === 'markdown') {
             const wrapper = document.createElement('div');
             wrapper.className = 'project-file-preview-markdown';
             wrapper.innerHTML = renderMarkdown(content);
-            dom.projectFileModalBody.innerHTML = '';
-            dom.projectFileModalBody.appendChild(wrapper);
+            container.innerHTML = '';
+            container.appendChild(wrapper);
             enhanceCodeBlocks(wrapper);
             return;
         }
         if (renderType === 'json') {
-            renderProjectJSON(content);
+            renderProjectJSONInto(container, content);
             return;
         }
         if (renderType === 'xml' || renderType === 'code') {
-            renderProjectHighlightedCode(content, language || renderType);
+            renderProjectHighlightedCodeInto(container, content, language || renderType);
             return;
         }
-        renderProjectPlainText(content);
+        renderProjectPlainTextInto(container, content);
+    }
+
+    function renderProjectFileEditor(content) {
+        if (!dom.projectFileModalBody) return;
+        const textarea = document.createElement('textarea');
+        textarea.className = 'project-file-editor';
+        textarea.spellcheck = false;
+        textarea.value = content || '';
+        dom.projectFileModalBody.innerHTML = '';
+        dom.projectFileModalBody.appendChild(textarea);
+        if (dom.projectFileModalSave) {
+            dom.projectFileModalSave.hidden = false;
+            dom.projectFileModalSave.disabled = false;
+        }
+        textarea.focus({ preventScroll: true });
     }
 
     function renderProjectJSON(content) {
@@ -1509,6 +2180,44 @@
         dom.projectFileModalBody.appendChild(pre);
     }
 
+    function renderProjectJSONInto(container, content) {
+        if (!container) return;
+        let text = content;
+        let parseError = null;
+        try {
+            text = JSON.stringify(JSON.parse(content), null, 2);
+        } catch (err) {
+            parseError = err;
+            console.warn('project file JSON parse failed, fallback to raw text', err);
+        }
+        renderProjectHighlightedCodeInto(container, text, 'json');
+        if (parseError) {
+            const note = document.createElement('div');
+            note.className = 'project-file-preview-note';
+            note.textContent = 'JSON parse failed. Showing raw content.';
+            container.insertBefore(note, container.firstChild);
+        }
+    }
+
+    function renderProjectHighlightedCodeInto(container, content, language) {
+        if (!container) return;
+        const pre = document.createElement('pre');
+        pre.className = 'project-file-preview-code hljs';
+        if (language) pre.classList.add(`language-${language}`);
+        pre.innerHTML = highlightCode(content, language);
+        container.innerHTML = '';
+        container.appendChild(pre);
+    }
+
+    function renderProjectPlainTextInto(container, content) {
+        if (!container) return;
+        const pre = document.createElement('pre');
+        pre.className = 'project-file-preview-plain';
+        pre.textContent = content || '';
+        container.innerHTML = '';
+        container.appendChild(pre);
+    }
+
     function renderProjectFileUnavailable(reason, file) {
         const text = projectFileReasonText(reason);
         updateProjectFileModalMeta(file || {}, reason);
@@ -1517,6 +2226,12 @@
 
     function renderProjectFileState(kind, message) {
         if (!dom.projectFileModalBody) return;
+        if (dom.projectFileModalSave) dom.projectFileModalSave.hidden = true;
+        renderProjectStateInto(dom.projectFileModalBody, kind, message);
+    }
+
+    function renderProjectStateInto(container, kind, message) {
+        if (!container) return;
         const el = document.createElement('div');
         const cls = kind === 'error'
             ? 'project-file-preview-error'
@@ -1527,8 +2242,8 @@
                     : 'project-file-preview-placeholder';
         el.className = cls;
         el.textContent = message || '';
-        dom.projectFileModalBody.innerHTML = '';
-        dom.projectFileModalBody.appendChild(el);
+        container.innerHTML = '';
+        container.appendChild(el);
     }
 
     function projectFileReasonText(reason) {
@@ -1538,8 +2253,12 @@
     function bindProjectFilePanel() {
         if (state.projectPanelBound) return;
         state.projectPanelBound = true;
+        const actions = document.querySelector('.project-panel-actions');
+        if (dom.projectPanelTabs && actions && actions.parentElement !== dom.projectPanelTabs) {
+            dom.projectPanelTabs.appendChild(actions);
+        }
         dom.projectTabButtons.forEach(btn => {
-            btn.addEventListener('click', () => setProjectTab(btn.dataset.projectTab || 'files'));
+            btn.addEventListener('click', () => setProjectTab(btn.dataset.projectTab || 'workspace'));
         });
         if (dom.projectGitRefreshBtn) {
             dom.projectGitRefreshBtn.addEventListener('click', () => requestProjectGitChanges({ force: true }));
@@ -1550,9 +2269,25 @@
                 requestProjectSearch();
             });
         }
-        setProjectTab(state.projectActiveTab || 'files', { noLoad: true });
+        setProjectTab(state.projectActiveTab || 'workspace', { noLoad: true });
         if (dom.projectRefreshBtn) {
-            dom.projectRefreshBtn.addEventListener('click', () => requestProjectDir(state.projectDirPath || '', { force: true }));
+            dom.projectRefreshBtn.addEventListener('click', () => {
+                const scope = currentProjectScope();
+                const path = scope === 'setting' ? (state.projectDirPathByScope.setting || state.projectDirPath || '') : '';
+                requestProjectDir(path, { scope, force: true });
+            });
+        }
+        if (dom.projectNewFileBtn) {
+            dom.projectNewFileBtn.addEventListener('click', newProjectSettingFile);
+        }
+        if (dom.projectNewFolderBtn) {
+            dom.projectNewFolderBtn.addEventListener('click', newProjectSettingDirectory);
+        }
+        if (dom.projectFileModalSave) {
+            dom.projectFileModalSave.addEventListener('click', saveProjectSettingFile);
+        }
+        if (dom.projectWorkspacePreviewSave) {
+            dom.projectWorkspacePreviewSave.addEventListener('click', saveWorkspaceSettingFile);
         }
         if (dom.projectFileModal) {
             dom.projectFileModal.querySelectorAll('[data-project-file-modal-close]').forEach(el => {
@@ -4439,6 +5174,7 @@
         bindClarificationModal();
         bindProjectFilePanel();
         bindUserMenu();
+        bindSidebarCollapse();
         bindCompactBtn();
         renderCompactStat();
         loadCurrentUser();

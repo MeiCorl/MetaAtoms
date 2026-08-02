@@ -29,6 +29,12 @@ const (
 	MsgTypeListProjectDir = "list_project_dir"
 	// MsgTypeReadProjectFile requests a safe read-only project file preview.
 	MsgTypeReadProjectFile = "read_project_file"
+	// MsgTypeWriteProjectFile writes or creates a text file in a writable UI scope.
+	MsgTypeWriteProjectFile = "write_project_file"
+	// MsgTypeCreateProjectEntry creates a file or directory in a writable UI scope.
+	MsgTypeCreateProjectEntry = "create_project_entry"
+	// MsgTypeDeleteProjectEntry deletes a file or directory in a writable UI scope.
+	MsgTypeDeleteProjectEntry = "delete_project_entry"
 	// MsgTypeListProjectGitChanges requests changed files for the Git tab.
 	MsgTypeListProjectGitChanges = "list_project_git_changes"
 	// MsgTypeReadProjectGitDiff requests before/after content for one changed file.
@@ -80,6 +86,12 @@ const (
 	MsgTypeProjectDir = "project_dir"
 	// MsgTypeProjectFile responds to read_project_file with file metadata/content or reason.
 	MsgTypeProjectFile = "project_file"
+	// MsgTypeProjectFileWritten responds to write_project_file.
+	MsgTypeProjectFileWritten = "project_file_written"
+	// MsgTypeProjectEntryCreated responds to create_project_entry.
+	MsgTypeProjectEntryCreated = "project_entry_created"
+	// MsgTypeProjectEntryDeleted responds to delete_project_entry.
+	MsgTypeProjectEntryDeleted = "project_entry_deleted"
 	// MsgTypeProjectGitChanges responds to list_project_git_changes.
 	MsgTypeProjectGitChanges = "project_git_changes"
 	// MsgTypeProjectGitDiff responds to read_project_git_diff.
@@ -426,6 +438,7 @@ type FileDiffPayload struct {
 // ListProjectDirPayload requests a project directory by workdir-relative path.
 type ListProjectDirPayload struct {
 	Path      string `json:"path"`
+	Scope     string `json:"scope,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 }
 
@@ -433,6 +446,7 @@ type ListProjectDirPayload struct {
 type ProjectDirPayload struct {
 	OK          bool                `json:"ok"`
 	Reason      string              `json:"reason,omitempty"`
+	Scope       string              `json:"scope,omitempty"`
 	Path        string              `json:"path"`
 	ParentPath  string              `json:"parent_path"`
 	Breadcrumbs []ProjectBreadcrumb `json:"breadcrumbs"`
@@ -444,6 +458,32 @@ type ProjectDirPayload struct {
 // ReadProjectFilePayload requests a project file by workdir-relative path.
 type ReadProjectFilePayload struct {
 	Path      string `json:"path"`
+	Scope     string `json:"scope,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// WriteProjectFilePayload writes or creates a text file in an explicitly
+// writable project browser scope. The first supported writable scope is
+// "setting"; workspace remains read/download-oriented from the side panel.
+type WriteProjectFilePayload struct {
+	Path      string `json:"path"`
+	Scope     string `json:"scope,omitempty"`
+	Content   string `json:"content"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// CreateProjectEntryPayload creates a file or directory in a writable scope.
+type CreateProjectEntryPayload struct {
+	Path      string `json:"path"`
+	Scope     string `json:"scope,omitempty"`
+	Kind      string `json:"kind"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// DeleteProjectEntryPayload deletes a file or directory in a writable scope.
+type DeleteProjectEntryPayload struct {
+	Path      string `json:"path"`
+	Scope     string `json:"scope,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 }
 
@@ -452,6 +492,7 @@ type ProjectFilePayload struct {
 	Found     bool             `json:"found"`
 	OK        bool             `json:"ok"`
 	Reason    string           `json:"reason,omitempty"`
+	Scope     string           `json:"scope,omitempty"`
 	File      ProjectFileEntry `json:"file"`
 	Content   string           `json:"content,omitempty"`
 	RequestID string           `json:"request_id,omitempty"`
@@ -496,6 +537,7 @@ type ProjectGitDiffPayload struct {
 // ProjectSearchRequestPayload requests bounded content search inside the project.
 type ProjectSearchRequestPayload struct {
 	ProjectSearchRequest
+	Scope     string `json:"scope,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 }
 
@@ -503,6 +545,7 @@ type ProjectSearchRequestPayload struct {
 type ProjectSearchPayload struct {
 	OK           bool                      `json:"ok"`
 	Reason       string                    `json:"reason,omitempty"`
+	Scope        string                    `json:"scope,omitempty"`
 	Query        string                    `json:"query"`
 	Path         string                    `json:"path"`
 	Regex        bool                      `json:"regex"`

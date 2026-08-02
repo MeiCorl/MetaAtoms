@@ -37,8 +37,8 @@ func NewAssociateProjectTool(userDir string, associator projectSessionAssociator
 	return &AssociateProjectTool{
 		BaseTool: tool.BaseTool{
 			ToolName:        AssociateProjectToolName,
-			ToolDescription: "Associate the current session with a generated project under the user's workspace. Use this after creating a product-delivery project directory so future resumed sessions can keep updating the same project.",
-			ToolInputSchema: json.RawMessage(`{"type":"object","properties":{"project_name":{"type":"string","description":"Stable project slug or name, for example breakout-game."},"project_path":{"type":"string","description":"Project directory. Omit to use workspace/<project_name>. Must resolve under the current user's workspace directory."},"workflow_id":{"type":"string","description":"Optional product-delivery workflow id."},"workflow_path":{"type":"string","description":"Optional path to docs/workflow.json. Must resolve under the project directory when provided."}},"required":["project_name"]}`),
+			ToolDescription: "Reserve and associate a generated project under the user's workspace. For a new product-delivery project, call this before writing files and omit project_path so an existing workspace/<project_name> is automatically advanced to workspace/<project_name>-2, -3, and so on. Use the returned project.name/path/workflow_path for all generated files.",
+			ToolInputSchema: json.RawMessage(`{"type":"object","properties":{"project_name":{"type":"string","description":"Candidate project slug or name, for example breakout-game. When project_path is omitted, the tool returns a unique name under workspace, adding -2, -3, and so on if needed."},"project_path":{"type":"string","description":"Existing project directory to associate for resume/update flows. Omit for new projects so the tool can allocate a unique workspace/<project_name> path."},"workflow_id":{"type":"string","description":"Optional product-delivery workflow id. Defaults to the final project name when omitted."},"workflow_path":{"type":"string","description":"Optional path to docs/workflow.json. Defaults to docs/workflow.json under the final project path."}},"required":["project_name"]}`),
 			ToolPermission:  tool.PermWrite,
 		},
 		userDir:       userDir,
@@ -63,22 +63,34 @@ func (t *AssociateProjectTool) Execute(ctx context.Context, input json.RawMessag
 		return "", errors.New("project_name cannot be empty")
 	}
 
-	projectPath, err := t.resolveProjectPath(projectName, in.ProjectPath)
+	projectPath, finalProjectName, err := t.resolveProjectPath(projectName, in.ProjectPath)
 	if err != nil {
 		return "", err
 	}
+	projectName = finalProjectName
+
+	workflowID := strings.TrimSpace(in.WorkflowID)
+	if workflowID == "" {
+		workflowID = projectName
+	}
 	workflowPath := strings.TrimSpace(in.WorkflowPath)
+	if workflowPath == "" {
+		workflowPath = filepath.Join(projectPath, "docs", "workflow.json")
+	}
 	if workflowPath != "" {
 		workflowPath, err = t.resolveWorkflowPath(projectPath, workflowPath)
 		if err != nil {
 			return "", err
 		}
 	}
+	if err := os.MkdirAll(projectPath, 0755); err != nil {
+		return "", fmt.Errorf("reserve project directory: %w", err)
+	}
 
 	sessionID, err := t.associator.AssociateCurrentGeneratedProject(memsession.GeneratedProject{
 		Name:         projectName,
 		Path:         projectPath,
-		WorkflowID:   strings.TrimSpace(in.WorkflowID),
+		WorkflowID:   workflowID,
 		WorkflowPath: workflowPath,
 	})
 	if err != nil {
@@ -90,7 +102,7 @@ func (t *AssociateProjectTool) Execute(ctx context.Context, input json.RawMessag
 		"project": map[string]string{
 			"name":          projectName,
 			"path":          projectPath,
-			"workflow_id":   strings.TrimSpace(in.WorkflowID),
+			"workflow_id":   workflowID,
 			"workflow_path": workflowPath,
 		},
 	}
@@ -101,12 +113,13 @@ func (t *AssociateProjectTool) Execute(ctx context.Context, input json.RawMessag
 	return string(data), nil
 }
 
-func (t *AssociateProjectTool) resolveProjectPath(projectName, rawPath string) (string, error) {
+func (t *AssociateProjectTool) resolveProjectPath(projectName, rawPath string) (string, string, error) {
 	if strings.TrimSpace(t.userDir) == "" {
-		return "", errors.New("user directory is not configured")
+		return "", "", errors.New("user directory is not configured")
 	}
 	path := strings.TrimSpace(rawPath)
 	if path == "" {
+		projectName = t.uniqueProjectName(projectName)
 		path = filepath.Join(t.workspaceRoot, projectName)
 	} else {
 		path = expandHome(path)
@@ -121,19 +134,36 @@ func (t *AssociateProjectTool) resolveProjectPath(projectName, rawPath string) (
 	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve project_path: %w", err)
+		return "", "", fmt.Errorf("resolve project_path: %w", err)
 	}
 	absWorkspace, err := filepath.Abs(t.workspaceRoot)
 	if err != nil {
-		return "", fmt.Errorf("resolve workspace root: %w", err)
+		return "", "", fmt.Errorf("resolve workspace root: %w", err)
 	}
 	if !isPathInside(absPath, absWorkspace) {
-		return "", fmt.Errorf("project_path must be under workspace: %s", absWorkspace)
+		return "", "", fmt.Errorf("project_path must be under workspace: %s", absWorkspace)
 	}
 	if isSamePath(absPath, absWorkspace) {
-		return "", fmt.Errorf("project_path must point to a project directory under workspace: %s", absWorkspace)
+		return "", "", fmt.Errorf("project_path must point to a project directory under workspace: %s", absWorkspace)
 	}
-	return filepath.Clean(absPath), nil
+	return filepath.Clean(absPath), projectName, nil
+}
+
+func (t *AssociateProjectTool) uniqueProjectName(base string) string {
+	if !pathExists(filepath.Join(t.workspaceRoot, base)) {
+		return base
+	}
+	for i := 2; ; i++ {
+		name := fmt.Sprintf("%s-%d", base, i)
+		if !pathExists(filepath.Join(t.workspaceRoot, name)) {
+			return name
+		}
+	}
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil || !os.IsNotExist(err)
 }
 
 func (t *AssociateProjectTool) resolveWorkflowPath(projectPath, rawPath string) (string, error) {

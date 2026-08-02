@@ -2,13 +2,15 @@ package runtime
 
 import "time"
 
-// PromptTrace captures the exact structured input used to start a subagent.
+// PromptTrace captures the structured input used to start a subagent. System
+// prompt bodies are intentionally omitted from JSON-facing traces to avoid
+// echoing role definitions back into the main Agent context.
 type PromptTrace struct {
 	Type               string         `json:"type"`
 	RoleName           string         `json:"role_name"`
 	Task               string         `json:"task"`
 	Metadata           map[string]any `json:"metadata,omitempty"`
-	SystemBlocks       []string       `json:"system_blocks"`
+	SystemBlocks       []string       `json:"system_blocks,omitempty"`
 	ToolNames          []string       `json:"tool_names"`
 	Model              string         `json:"model,omitempty"`
 	MaxTurns           int            `json:"max_turns"`

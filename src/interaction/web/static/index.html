@@ -13,7 +13,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
 
-    <link rel="stylesheet" href="/style.css?v=20260731-atom-icon">
+    <link rel="stylesheet" href="/style.css?v=20260802-codeblock-preview">
     <link rel="stylesheet" href="/vendor/highlight-theme.css?v=20260731-atom-icon">
 
     <!-- 主题同步：默认亮色；HTML 解析期立即从 localStorage 读取并写到 <html data-theme="...">，
@@ -120,6 +120,11 @@
         <!-- 左侧会话历史 -->
         <aside class="sidebar" role="complementary" aria-label="会话历史">
             <div class="sidebar-header">
+                <button id="sidebar-collapse-btn" class="sidebar-collapse" type="button" title="Collapse sessions" aria-label="Collapse sessions" aria-expanded="true">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="m15 18-6-6 6-6"/>
+                    </svg>
+                </button>
                 <span class="sidebar-title">Sessions</span>
                 <button id="new-session-btn" class="sidebar-new" type="button" title="新建会话">+ NEW</button>
             </div>
@@ -214,28 +219,45 @@
         <!-- 右侧用户文件侧栏：文件 / Git / 搜索多标签，Task 5 接入交互逻辑 -->
         <aside id="project-file-panel" class="project-file-panel" role="complementary" aria-label="用户文件侧栏">
             <div class="project-panel-tabs" role="tablist" aria-label="用户文件侧栏视图">
-                <button id="project-tab-files-btn" class="project-panel-tab is-active" data-project-tab="files" type="button" role="tab" aria-selected="true" aria-controls="project-tab-files">文件</button>
-                <button id="project-tab-git-btn" class="project-panel-tab" data-project-tab="git" type="button" role="tab" aria-selected="false" aria-controls="project-tab-git">Git</button>
-                <button id="project-tab-search-btn" class="project-panel-tab" data-project-tab="search" type="button" role="tab" aria-selected="false" aria-controls="project-tab-search">搜索</button>
+                <button id="project-tab-workspace-btn" class="project-panel-tab is-active" data-project-tab="workspace" type="button" role="tab" aria-selected="true" aria-controls="project-tab-files">Workspace</button>
+                <button id="project-tab-setting-btn" class="project-panel-tab" data-project-tab="setting" type="button" role="tab" aria-selected="false" aria-controls="project-tab-files">Setting</button>
             </div>
 
-            <section id="project-tab-files" class="project-panel-tabpanel is-active" data-project-tab-panel="files" role="tabpanel" aria-labelledby="project-tab-files-btn">
+            <section id="project-tab-files" class="project-panel-tabpanel is-active" data-project-tab-panel="browser" role="tabpanel" aria-labelledby="project-tab-workspace-btn">
                 <div class="project-panel-header">
                     <div class="project-panel-heading">
-                        <span class="project-panel-title">User Files</span>
+                        <span id="project-panel-title" class="project-panel-title">Workspace</span>
                         <span id="project-panel-count" class="project-panel-count" aria-live="polite">--</span>
                     </div>
-                    <button id="project-refresh-btn" class="project-panel-refresh" type="button" title="刷新当前目录" aria-label="刷新当前目录">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74"/>
-                            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74"/>
-                            <path d="M8 18H5v3"/>
-                            <path d="M16 6h3V3"/>
-                        </svg>
-                    </button>
+                    <div class="project-panel-actions">
+                        <button id="project-new-file-btn" class="project-panel-refresh" type="button" title="New file" aria-label="New file" hidden>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"/>
+                                <path d="M14 2v6h6"/>
+                                <path d="M12 18v-6"/>
+                                <path d="M9 15h6"/>
+                            </svg>
+                        </button>
+                        <button id="project-new-folder-btn" class="project-panel-refresh" type="button" title="New folder" aria-label="New folder" hidden>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M12 10v6"/>
+                                <path d="M9 13h6"/>
+                                <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/>
+                            </svg>
+                        </button>
+                        <button id="project-refresh-btn" class="project-panel-refresh" type="button" title="刷新当前目录" aria-label="刷新当前目录">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74"/>
+                                <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74"/>
+                                <path d="M8 18H5v3"/>
+                                <path d="M16 6h3V3"/>
+                            </svg>
+                        </button>
+                    </div>
                 </div>
+                <div id="project-setting-user" class="project-setting-user" hidden></div>
 
-                <div class="project-pathbar">
+                <div class="project-pathbar" hidden>
                     <div id="project-current-path" class="project-current-path" title="用户目录">.</div>
                     <nav id="project-breadcrumbs" class="project-breadcrumbs" aria-label="用户目录面包屑">
                         <button class="project-crumb is-active" type="button" title="用户目录">root</button>
@@ -259,6 +281,22 @@
                 </div>
 
                 <div id="project-file-list" class="project-file-list" role="list" aria-live="polite" aria-label="用户文件列表"></div>
+                    <section id="project-workspace-preview" class="project-workspace-preview" aria-label="Workspace file preview" hidden>
+                        <div class="project-workspace-preview-header">
+                            <div class="project-workspace-preview-title-wrap">
+                                <span id="project-workspace-preview-title" class="project-workspace-preview-title">Select a file</span>
+                                <span id="project-workspace-preview-path" class="project-workspace-preview-path">--</span>
+                            </div>
+                            <div id="project-workspace-preview-meta" class="project-workspace-preview-meta" aria-live="polite">
+                                <span id="project-workspace-preview-size">--</span>
+                                <span id="project-workspace-preview-type">--</span>
+                            </div>
+                            <button id="project-workspace-preview-save" class="project-file-modal-save" type="button" hidden>Save</button>
+                        </div>
+                        <div id="project-workspace-preview-body" class="project-workspace-preview-body" tabindex="0">
+                            <div class="project-file-preview-placeholder">Select a file to preview.</div>
+                        </div>
+                    </section>
             </section>
 
             <section id="project-tab-git" class="project-panel-tabpanel" data-project-tab-panel="git" role="tabpanel" aria-labelledby="project-tab-git-btn" hidden>
@@ -295,41 +333,6 @@
                 <div id="project-git-list" class="project-git-list" data-project-git-list role="list" aria-live="polite" aria-label="Git 变更文件列表"></div>
             </section>
 
-            <section id="project-tab-search" class="project-panel-tabpanel" data-project-tab-panel="search" role="tabpanel" aria-labelledby="project-tab-search-btn" hidden>
-                <form id="project-search-form" class="project-search-form" data-project-search-form role="search">
-                    <label class="project-search-field">
-                        <span class="project-search-label">关键词</span>
-                        <input id="project-search-query" class="project-search-input" data-project-search-query type="search" autocomplete="off" spellcheck="false" placeholder="输入要搜索的内容">
-                    </label>
-                    <label class="project-search-field">
-                        <span class="project-search-label">路径</span>
-                        <input id="project-search-path" class="project-search-input" data-project-search-path type="text" autocomplete="off" spellcheck="false" placeholder="相对路径，可留空">
-                    </label>
-                    <label class="project-search-toggle">
-                        <input id="project-search-regex" data-project-search-regex type="checkbox">
-                        <span>正则</span>
-                    </label>
-                    <label class="project-search-field">
-                        <span class="project-search-label">排除</span>
-                        <input id="project-search-exclude" class="project-search-input" data-project-search-exclude type="text" autocomplete="off" spellcheck="false" placeholder="node_modules, dist, *.log">
-                    </label>
-                    <button id="project-search-run-btn" class="project-search-run" data-project-search-run type="submit">搜索</button>
-                </form>
-                <div id="project-search-summary" class="project-search-summary" aria-live="polite">输入关键词后执行搜索。</div>
-                <div id="project-search-loading" class="project-panel-state project-panel-loading" hidden role="status" aria-live="polite">
-                    <span class="project-panel-spinner" aria-hidden="true"></span>
-                    <span>正在搜索用户目录内容...</span>
-                </div>
-                <div id="project-search-empty" class="project-panel-state project-panel-empty" hidden>
-                    <span class="project-panel-state-title">没有搜索结果</span>
-                    <span class="project-panel-state-note">换一个关键词、路径或排除规则再试。</span>
-                </div>
-                <div id="project-search-error" class="project-panel-state project-panel-error" hidden role="alert">
-                    <span class="project-panel-state-title">搜索失败</span>
-                    <span id="project-search-error-text" class="project-panel-state-note">请稍后重试。</span>
-                </div>
-                <div id="project-search-results" class="project-search-results" data-project-search-results role="list" aria-live="polite" aria-label="用户文件搜索结果"></div>
-            </section>
         </aside>
         <!-- 开发者模式 + Export SP 模态框（Step 4 可观测性） -->
         <div id="dev-panel" class="dev-panel" hidden>
@@ -354,7 +357,10 @@
                         <span id="project-file-modal-title" class="project-file-modal-title">文件预览</span>
                         <span id="project-file-modal-path" class="project-file-modal-path" title="--">--</span>
                     </div>
-                    <button id="project-file-modal-close" class="project-file-modal-close" data-project-file-modal-close type="button" title="关闭 (Esc)" aria-label="关闭文件预览">×</button>
+                    <div class="project-file-modal-actions">
+                        <button id="project-file-modal-save" class="project-file-modal-save" type="button" hidden>Save</button>
+                        <button id="project-file-modal-close" class="project-file-modal-close" data-project-file-modal-close type="button" title="关闭 (Esc)" aria-label="关闭文件预览">×</button>
+                    </div>
                 </div>
                 <div id="project-file-modal-meta" class="project-file-modal-meta" aria-live="polite">
                     <span id="project-file-modal-size">--</span>
@@ -447,6 +453,6 @@
     <script src="/vendor/highlight.min.js?v=20260731-atom-icon" defer></script>
     <!-- Step 1.4 接入 diff-match-patch：app.js 的 openFileDiffModal 通过全局 diff_match_patch 计算行级 diff -->
     <script src="/vendor/diff-match-patch.min.js?v=20260731-atom-icon" defer></script>
-    <script src="/app.js?v=20260731-atom-icon" defer></script>
+    <script src="/app.js?v=20260802-setting-refresh" defer></script>
 </body>
 </html>

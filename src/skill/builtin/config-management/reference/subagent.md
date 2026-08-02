@@ -102,7 +102,7 @@ background:
 | `architect` | 根据需求生成 `architecture.md`，包含 Mermaid 架构图和时序图 | `ReadFile` / `WriteFile` / `EditFile` / `Glob` / `Grep` |
 | `tech-lead` | 根据需求和架构生成可断点续做的 `tasks.md` | `ReadFile` / `WriteFile` / `EditFile` / `Glob` / `Grep` |
 | `engineer` | 按 `tasks.md` 的单个任务独立编码实现 | 完整工具视图，仍受全局权限、沙箱和防嵌套规则约束 |
-| `tester` | 生成 `checklists.md`，并在执行阶段更新测试结果和 `test-report.md` | 完整工具视图，仍受全局权限、沙箱和防嵌套规则约束 |
+| `tester` | 按测试类型生成 `docs/test_plan/*_test_plan.md`，并在执行阶段更新对应计划文件内 case 状态 | 完整工具视图，仍受全局权限、沙箱和防嵌套规则约束 |
 
 ### 与 tools / safety 的关系
 

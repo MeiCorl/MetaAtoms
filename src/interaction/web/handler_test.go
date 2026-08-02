@@ -381,6 +381,19 @@ func TestBusyRejectsConcurrentInput(t *testing.T) {
 	if !gotBusy {
 		t.Fatal("流式进行中再发 user_input 应返回 busy")
 	}
+
+	r.send(t, MsgTypeAbortStream, nil)
+	deadline = time.Now().Add(2 * time.Second)
+	var gotDone bool
+	for time.Now().Before(deadline) && !gotDone {
+		msg := r.recv(t, time.Until(deadline))
+		if msg.Type == MsgTypeStreamDone {
+			gotDone = true
+		}
+	}
+	if !gotDone {
+		t.Fatal("测试结束前应收到 stream_done 以释放会话资源")
+	}
 }
 
 // TestEmptyUserInput 验证空文本返回 empty_input 错误。

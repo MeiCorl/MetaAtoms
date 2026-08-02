@@ -38,12 +38,21 @@ const (
 	ProjectFileReasonBinary         = "binary"
 	ProjectFileReasonTooLarge       = "too_large"
 	ProjectFileReasonReadError      = "read_error"
+	ProjectFileReasonInvalidScope   = "invalid_scope"
+	ProjectFileReasonWriteDenied    = "write_denied"
+	ProjectFileReasonInvalidJSON    = "invalid_json"
+	ProjectFileReasonAlreadyExists  = "already_exists"
 )
 
 const (
 	ProjectFileDefaultMaxEntries = 500
 	ProjectFileDefaultMaxBytes   = 512 * 1024
 	projectFileSniffBytes        = 512
+)
+
+const (
+	ProjectFileScopeWorkspace = "workspace"
+	ProjectFileScopeSetting   = "setting"
 )
 
 // ProjectFileEntry describes one item in the current project directory level.
@@ -210,6 +219,153 @@ func (b *ProjectFileBrowser) ReadFile(relPath string) (ProjectFileResult, error)
 	fileEntry.Language = language
 	fileEntry.Previewable = true
 	return ProjectFileResult{Found: true, OK: true, File: fileEntry, Content: string(data)}, nil
+}
+
+// WriteTextFile creates or replaces a text file inside the browser root.
+func (b *ProjectFileBrowser) WriteTextFile(relPath, content string) (ProjectFileResult, error) {
+	absPath, cleanRel, err := b.resolveProjectPath(relPath)
+	if err != nil {
+		return ProjectFileResult{Found: false, OK: false, Reason: projectPathErrorReason(err)}, err
+	}
+	if strings.TrimSpace(cleanRel) == "" {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonInvalidPath}, fmt.Errorf("file path is empty")
+	}
+	if int64(len([]byte(content))) > b.maxFileBytes {
+		return ProjectFileResult{Found: true, OK: false, Reason: ProjectFileReasonTooLarge}, nil
+	}
+
+	root, err := b.projectRoot()
+	if err != nil {
+		return ProjectFileResult{Found: false, OK: false, Reason: projectPathErrorReason(err)}, err
+	}
+	parent := filepath.Dir(absPath)
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonReadError}, err
+	}
+	realParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonReadError}, err
+	}
+	realParent = filepath.Clean(realParent)
+	if !security.IsPathInside(realParent, root) {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonOutsideWorkdir}, fmt.Errorf("parent path escapes workdir: %q", relPath)
+	}
+	target := filepath.Join(realParent, filepath.Base(absPath))
+	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		return ProjectFileResult{Found: true, OK: false, Reason: ProjectFileReasonIsDirectory, File: b.entryFromFileInfo(filepath.Base(target), cleanRel, info, true)}, nil
+	}
+	if err := os.WriteFile(target, []byte(content), 0644); err != nil {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonReadError}, err
+	}
+	return b.ReadFile(cleanRel)
+}
+
+// CreateEntry creates a new empty file or directory inside the browser root.
+func (b *ProjectFileBrowser) CreateEntry(relPath, kind string) (ProjectFileResult, error) {
+	absPath, cleanRel, err := b.resolveProjectPath(relPath)
+	if err != nil {
+		return ProjectFileResult{Found: false, OK: false, Reason: projectPathErrorReason(err)}, err
+	}
+	if strings.TrimSpace(cleanRel) == "" {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonInvalidPath}, fmt.Errorf("entry path is empty")
+	}
+
+	root, err := b.projectRoot()
+	if err != nil {
+		return ProjectFileResult{Found: false, OK: false, Reason: projectPathErrorReason(err)}, err
+	}
+	parent := filepath.Dir(absPath)
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonReadError}, err
+	}
+	realParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonReadError}, err
+	}
+	realParent = filepath.Clean(realParent)
+	if !security.IsPathInside(realParent, root) {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonOutsideWorkdir}, fmt.Errorf("parent path escapes workdir: %q", relPath)
+	}
+
+	target := filepath.Join(realParent, filepath.Base(absPath))
+	if info, err := os.Stat(target); err == nil {
+		return ProjectFileResult{
+			Found:  true,
+			OK:     false,
+			Reason: ProjectFileReasonAlreadyExists,
+			File:   b.entryFromFileInfo(filepath.Base(target), cleanRel, info, info.IsDir()),
+		}, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonReadError}, err
+	}
+
+	switch normalizeProjectEntryKind(kind) {
+	case ProjectFileTypeDirectory:
+		if err := os.Mkdir(target, 0755); err != nil {
+			return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonReadError}, err
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonReadError}, err
+		}
+		entry := b.entryFromFileInfo(filepath.Base(target), cleanRel, info, true)
+		return ProjectFileResult{Found: true, OK: true, File: entry}, nil
+	case ProjectFileTypeFile:
+		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		if err != nil {
+			return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonReadError}, err
+		}
+		if err := f.Close(); err != nil {
+			return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonReadError}, err
+		}
+		return b.ReadFile(cleanRel)
+	default:
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonInvalidPath}, fmt.Errorf("unsupported entry kind: %q", kind)
+	}
+}
+
+func normalizeProjectEntryKind(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case ProjectFileTypeFile, "":
+		return ProjectFileTypeFile
+	case ProjectFileTypeDirectory, "dir", "folder":
+		return ProjectFileTypeDirectory
+	default:
+		return strings.ToLower(strings.TrimSpace(kind))
+	}
+}
+
+// DeleteEntry removes a file or directory inside the browser root.
+func (b *ProjectFileBrowser) DeleteEntry(relPath string) (ProjectFileResult, error) {
+	absPath, cleanRel, err := b.resolveProjectPath(relPath)
+	if err != nil {
+		return ProjectFileResult{Found: false, OK: false, Reason: projectPathErrorReason(err)}, err
+	}
+	if strings.TrimSpace(cleanRel) == "" {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonInvalidPath}, fmt.Errorf("entry path is empty")
+	}
+	root, err := b.projectRoot()
+	if err != nil {
+		return ProjectFileResult{Found: false, OK: false, Reason: projectPathErrorReason(err)}, err
+	}
+	if filepath.Clean(absPath) == filepath.Clean(root) {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonInvalidPath}, fmt.Errorf("cannot delete browser root")
+	}
+	if !security.IsPathInside(absPath, root) {
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonOutsideWorkdir}, fmt.Errorf("path escapes workdir: %q", relPath)
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonNotFound}, nil
+		}
+		return ProjectFileResult{Found: false, OK: false, Reason: ProjectFileReasonReadError}, err
+	}
+	entry := b.entryFromFileInfo(filepath.Base(absPath), cleanRel, info, info.IsDir())
+	if err := os.RemoveAll(absPath); err != nil {
+		return ProjectFileResult{Found: true, OK: false, Reason: ProjectFileReasonReadError, File: entry}, err
+	}
+	return ProjectFileResult{Found: true, OK: true, File: entry}, nil
 }
 
 func (b *ProjectFileBrowser) projectRoot() (string, error) {
