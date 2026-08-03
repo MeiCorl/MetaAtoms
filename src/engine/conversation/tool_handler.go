@@ -33,7 +33,7 @@ type ToolExecutionEvent struct {
 	Name string
 	// Input 为 LLM 传入的原始参数
 	Input json.RawMessage
-	// Output 为工具执行结果文本（成功时）；失败时为空
+	// Output 为工具执行结果文本；失败时可能包含工具返回的部分输出
 	Output string
 	// IsError 表示工具执行是否失败
 	IsError bool
@@ -227,13 +227,13 @@ func (h *ToolHandler) Execute(ctx context.Context, toolUse llm.ToolUseBlock) llm
 		Content:   output,
 		IsError:   execErr != nil,
 	}
+	event.Output = output
 	if execErr != nil {
 		result.Content = execErr.Error()
 		event.IsError = true
 		event.ErrorMsg = execErr.Error()
 		event.Status = h.classifyStatus(execErr, ctx)
 	} else {
-		event.Output = output
 		event.Status = ToolEventStatusCompleted
 	}
 	event.DurationMs = duration

@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -290,6 +291,37 @@ func TestToolCallEndPayload(t *testing.T) {
 	}
 	if p.Output != "echo:hi" {
 		t.Errorf("Output = %q, 期望 echo:hi", p.Output)
+	}
+}
+
+// TestToolCallEndPayload_ErrorIncludesMessage 验证工具返回 ("", error) 时
+// 实时 tool_call_end.output 仍包含错误文本，避免前端出现 failed 但 OUTPUT 为空。
+func TestToolCallEndPayload_ErrorIncludesMessage(t *testing.T) {
+	toolInst := &errorToolForTest{err: errors.New("未在文件中找到 old_string 指定的内容")}
+	scripts := [][]llm.StreamChunk{
+		{{
+			Done:     true,
+			ToolUses: []llm.ToolUseBlock{{ID: "err1", Name: "errtool", Input: json.RawMessage(`{}`)}},
+		}},
+		{{Content: "handled", Done: true}},
+	}
+	r := newToolRig(t, scripts, toolInst)
+	r.client.WriteMessage(websocket.TextMessage, mustEncode(MsgTypeUserInput, UserInputPayload{Text: "fail"}))
+
+	msgs := r.recvAll(t, 2*time.Second)
+	end := findByType(msgs, MsgTypeToolCallEnd)
+	if end == nil {
+		t.Fatalf("未收到 tool_call_end: %+v", msgs)
+	}
+	p, _ := AsPayload[ToolCallEndPayload](*end)
+	if !p.IsError {
+		t.Fatal("IsError 应为 true")
+	}
+	if strings.TrimSpace(p.Output) == "" || !strings.Contains(p.Output, "old_string") {
+		t.Fatalf("失败 output 应包含错误文本，实际: %q", p.Output)
+	}
+	if p.Status != ToolCallStatusError {
+		t.Fatalf("Status = %q, 期望 error", p.Status)
 	}
 }
 
@@ -603,6 +635,11 @@ type echoToolForTest struct {
 	toolNameOverride string
 }
 
+type errorToolForTest struct {
+	tool.BaseTool
+	err error
+}
+
 func (e *echoToolForTest) Execute(_ context.Context, input json.RawMessage) (string, error) {
 	atomic.AddInt32(&e.calls, 1)
 	var p struct {
@@ -646,6 +683,16 @@ func (e *echoToolForTest) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}}}`)
 }
 func (e *echoToolForTest) Permission() tool.ToolPermission { return tool.PermRead }
+
+func (e *errorToolForTest) Execute(_ context.Context, _ json.RawMessage) (string, error) {
+	return "", e.err
+}
+func (e *errorToolForTest) Name() string        { return "errtool" }
+func (e *errorToolForTest) Description() string { return "always fails" }
+func (e *errorToolForTest) InputSchema() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
+}
+func (e *errorToolForTest) Permission() tool.ToolPermission { return tool.PermRead }
 
 func (s *slowToolForTest) Name() string        { return "slow" }
 func (s *slowToolForTest) Description() string { return "sleeps" }

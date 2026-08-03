@@ -23,6 +23,9 @@
         sessionList:    $('session-list'),
         sessionTitle:   $('current-session-title'),
         sessionMeta:    $('current-session-meta'),
+        workflowStepper: $('workflow-stepper'),
+        workflowSteps:   $('workflow-steps'),
+        workflowMeta:    $('workflow-stepper-meta'),
         messages:       $('messages'),
         conversationStatus:     $('conversation-status'),
         conversationStatusText: $('conversation-status-text'),
@@ -101,6 +104,7 @@
         projectWorkspacePreviewSize:  $('project-workspace-preview-size'),
         projectWorkspacePreviewType:  $('project-workspace-preview-type'),
         projectWorkspacePreviewSave:  $('project-workspace-preview-save'),
+        projectWorkspacePreviewCollapse: $('project-workspace-preview-collapse-btn'),
         projectWorkspacePreviewBody:  $('project-workspace-preview-body'),
         projectFileModal:    $('project-file-modal'),
         projectFileModalTitle: $('project-file-modal-title'),
@@ -151,6 +155,8 @@
         settingReconnectTimer: null,
 
         sessionId: null,
+        sessions: [],
+        sessionsTableSessions: [],
         messages: [],                  // [{ role, content, tool_call? }]  与 DOM 镜像
         agentStatus: 'idle',           // idle | thinking | tool_running | error
         ctx: { used: 0, limit: 100, percentLeft: 100 },
@@ -213,6 +219,7 @@
         projectSearchSeq: 0,
         projectPanelBound: false,
         projectPanelCollapsed: false,
+        projectPreviewCollapsed: false,
         clarification: {
             sourceKey: '',
             workflowId: '',
@@ -222,6 +229,49 @@
             activeIndex: 0,
             answers: {},
         },
+        workflow: {
+            active: false,
+            phase: '',
+            status: 'idle',
+            projectName: '',
+            projectPath: '',
+            workflowId: '',
+        },
+    };
+
+    const PRODUCT_DELIVERY_STEPS = [
+        { id: 'initialization', label: '项目初始化' },
+        { id: 'requirements', label: '需求分析' },
+        { id: 'architecture', label: '架构设计' },
+        { id: 'implementation', label: '编码实现' },
+        { id: 'verification', label: '基础验证' },
+    ];
+
+    const WORKFLOW_PHASE_ALIAS = {
+        initialization: 'initialization',
+        init: 'initialization',
+        project_initialization: 'initialization',
+        项目初始化: 'initialization',
+        requirements: 'requirements',
+        requirement: 'requirements',
+        requirements_analysis: 'requirements',
+        analysis: 'requirements',
+        需求分析: 'requirements',
+        architecture: 'architecture',
+        design: 'architecture',
+        architecture_design: 'architecture',
+        架构设计: 'architecture',
+        implementation: 'implementation',
+        engineering: 'implementation',
+        coding: 'implementation',
+        development: 'implementation',
+        编码实现: 'implementation',
+        verification: 'verification',
+        validation: 'verification',
+        basic_verification: 'verification',
+        verify: 'verification',
+        基础验证: 'verification',
+        基础自检: 'verification',
     };
 
     // ---- / 快捷命令清单 ----
@@ -364,15 +414,22 @@
         }
     }
 
+    function setSidebarCollapsed(collapsed, options = {}) {
+        const next = !!collapsed;
+        applySidebarCollapsed(next);
+        if (options.persist !== false) {
+            try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? 'true' : 'false'); } catch (_) {}
+        }
+    }
+
     function bindSidebarCollapse() {
         let collapsed = false;
         try { collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'; } catch (_) {}
-        applySidebarCollapsed(collapsed);
+        setSidebarCollapsed(collapsed, { persist: false });
         if (!dom.sidebarCollapseBtn) return;
         dom.sidebarCollapseBtn.addEventListener('click', () => {
             const next = !dom.app?.classList.contains('is-sidebar-collapsed');
-            applySidebarCollapsed(next);
-            try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? 'true' : 'false'); } catch (_) {}
+            setSidebarCollapsed(next);
         });
     }
 
@@ -582,6 +639,242 @@
         return SUPPRESSED_TOOL_DISPLAY_NAMES.has(String(name || '').toLowerCase());
     }
 
+    function normalizeWorkflowPhase(phase) {
+        const raw = String(phase || '').trim();
+        if (!raw) return '';
+        const key = raw.toLowerCase().replace(/\s+/g, '_').replace(/-/g, '_');
+        return WORKFLOW_PHASE_ALIAS[key] || WORKFLOW_PHASE_ALIAS[raw] || '';
+    }
+
+    function workflowStepIndex(phase) {
+        const normalized = normalizeWorkflowPhase(phase);
+        return PRODUCT_DELIVERY_STEPS.findIndex(step => step.id === normalized);
+    }
+
+    function workflowStepLabel(phase) {
+        const idx = workflowStepIndex(phase);
+        return idx >= 0 ? PRODUCT_DELIVERY_STEPS[idx].label : '未开始';
+    }
+
+    function normalizeWorkflowStatus(status) {
+        const value = String(status || '').trim().toLowerCase();
+        if (['completed', 'complete', 'done'].includes(value)) return 'completed';
+        if (['blocked', 'failed', 'error'].includes(value)) return 'blocked';
+        if (['running', 'in_progress', 'active'].includes(value)) return 'running';
+        return value || 'idle';
+    }
+
+    function applyWorkflowState(patch, options = {}) {
+        if (!patch || typeof patch !== 'object') return;
+        const next = options.replace
+            ? { active: false, phase: '', status: 'idle', projectName: '', projectPath: '', workflowId: '' }
+            : { ...state.workflow };
+
+        if (patch.active !== undefined) next.active = patch.active === true;
+        if (patch.phase !== undefined) {
+            const normalized = normalizeWorkflowPhase(patch.phase);
+            if (normalized) next.phase = normalized;
+        }
+        if (patch.status !== undefined) next.status = normalizeWorkflowStatus(patch.status);
+        if (patch.projectName !== undefined) next.projectName = String(patch.projectName || '');
+        if (patch.projectPath !== undefined) next.projectPath = String(patch.projectPath || '');
+        if (patch.workflowId !== undefined) next.workflowId = String(patch.workflowId || '');
+        if (next.phase || next.projectName || next.workflowId) next.active = true;
+
+        state.workflow = next;
+        renderWorkflowStepper();
+    }
+
+    function resetWorkflowState() {
+        state.workflow = { active: false, phase: '', status: 'idle', projectName: '', projectPath: '', workflowId: '' };
+        renderWorkflowStepper();
+    }
+
+    function renderWorkflowStepper() {
+        if (!dom.workflowStepper || !dom.workflowSteps || !dom.workflowMeta) return;
+        if (!state.workflow.active) {
+            dom.workflowStepper.hidden = true;
+            dom.workflowSteps.innerHTML = '';
+            dom.workflowMeta.textContent = '未开始';
+            return;
+        }
+        dom.workflowStepper.hidden = false;
+        const currentIndex = workflowStepIndex(state.workflow.phase);
+        const isCompleted = state.workflow.status === 'completed';
+        const isBlocked = state.workflow.status === 'blocked';
+        const project = state.workflow.projectName || state.workflow.workflowId || '';
+        const currentLabel = isCompleted
+            ? '已完成'
+            : (isBlocked ? `${workflowStepLabel(state.workflow.phase)}阻塞` : workflowStepLabel(state.workflow.phase));
+        dom.workflowMeta.textContent = project ? `${currentLabel} · ${project}` : currentLabel;
+
+        dom.workflowSteps.innerHTML = PRODUCT_DELIVERY_STEPS.map((step, index) => {
+            let cls = 'workflow-step';
+            if (isCompleted || (currentIndex >= 0 && index < currentIndex)) cls += ' is-complete';
+            if (!isCompleted && currentIndex === index) cls += ' is-active';
+            if (isBlocked && currentIndex === index) cls += ' is-blocked';
+            return `
+                <li class="${cls}" data-phase="${step.id}">
+                    <span class="workflow-step-index">${index + 1}</span>
+                    <span class="workflow-step-label">${escapeHTML(step.label)}</span>
+                </li>`;
+        }).join('');
+    }
+
+    function applyWorkflowFromSummary(summary) {
+        const projects = Array.isArray(summary?.generated_projects) ? summary.generated_projects : [];
+        if (!projects.length) {
+            return;
+        }
+        const project = projects[projects.length - 1] || {};
+        applyWorkflowState({
+            active: true,
+            phase: state.workflow.phase || 'initialization',
+            status: state.workflow.status === 'idle' ? 'running' : state.workflow.status,
+            projectName: project.name || '',
+            projectPath: project.path || '',
+            workflowId: project.workflow_id || '',
+        });
+    }
+
+    function workflowPatchFromObject(obj) {
+        if (!obj || typeof obj !== 'object') return null;
+        const payload = obj.parsed_json || obj.structured_output?.parsed_json || obj;
+        const schema = String(payload.schema_version || '');
+        const type = String(payload.type || '');
+        const hasWorkflowShape = schema.startsWith('product-delivery/')
+            || type.startsWith('clarification_')
+            || payload.workflow_id;
+        if (!hasWorkflowShape) return null;
+
+        const patch = {
+            active: schema.startsWith('product-delivery/') || type.startsWith('clarification_') || Boolean(payload.workflow_id),
+            phase: payload.phase,
+            status: payload.status,
+            workflowId: payload.workflow_id,
+            projectName: payload.project_name,
+            projectPath: payload.project_path,
+        };
+        if (type === 'clarification_request' || payload.status === 'needs_clarification') {
+            patch.active = true;
+            patch.phase = 'requirements';
+            patch.status = 'running';
+        }
+        if (type === 'clarification_answers') {
+            patch.active = true;
+            patch.phase = 'requirements';
+            patch.status = 'running';
+        }
+        if (Array.isArray(payload.steps)) {
+            const runningStep = payload.steps.find(step => ['running', 'in_progress', 'active'].includes(normalizeWorkflowStatus(step.status)));
+            const blockedStep = payload.steps.find(step => normalizeWorkflowStatus(step.status) === 'blocked');
+            if (blockedStep) {
+                patch.active = true;
+                patch.phase = blockedStep.id || blockedStep.phase || blockedStep.label;
+                patch.status = 'blocked';
+            } else if (runningStep) {
+                patch.active = true;
+                patch.phase = runningStep.id || runningStep.phase || runningStep.label;
+                patch.status = 'running';
+            }
+        }
+        if (normalizeWorkflowStatus(payload.status) === 'completed') {
+            patch.active = true;
+            patch.phase = 'verification';
+            patch.status = 'completed';
+        }
+        return patch;
+    }
+
+    function applyWorkflowFromText(text) {
+        const trimmed = String(text || '').trim();
+        if (!trimmed) return;
+        const candidates = [trimmed];
+        const fenceRe = /```(?:json)?\s*([\s\S]*?)```/gi;
+        let match;
+        while ((match = fenceRe.exec(trimmed)) !== null) {
+            candidates.push(match[1]);
+        }
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+        }
+        for (const candidate of candidates) {
+            const patch = workflowPatchFromObject(tryParseJSON(candidate));
+            if (patch) applyWorkflowState(patch);
+        }
+        if (state.workflow.active && /生成已完成|交付完成|status["']?\s*[:=]\s*["']?completed/i.test(trimmed)) {
+            applyWorkflowState({ phase: 'verification', status: 'completed' });
+        }
+    }
+
+    function inferWorkflowPatchFromTool(name, payload, terminal) {
+        const lowerName = String(name || '').toLowerCase();
+        const obj = parseInputObject(payload);
+        const text = typeof payload === 'string' ? payload : formatToolArg(payload);
+        const path = String(obj?.path || obj?.file_path || obj?.filePath || '').replace(/\\/g, '/');
+        const content = String(obj?.content || '');
+
+        if (lowerName === 'use_skill') {
+            const skillName = String(obj?.skill_name || obj?.name || '').trim();
+            if (skillName === 'product-delivery') {
+                return { active: true, phase: 'initialization', status: 'running' };
+            }
+            return null;
+        }
+        if (lowerName === 'associate_project') {
+            const patch = { active: true, phase: 'initialization', status: terminal ? 'running' : 'running' };
+            const out = terminal ? tryParseJSON(text) : null;
+            const project = out?.project || {};
+            if (project.name) patch.projectName = project.name;
+            if (project.path) patch.projectPath = project.path;
+            if (project.workflow_id) patch.workflowId = project.workflow_id;
+            return patch;
+        }
+        if (path.endsWith('/docs/workflow.json') || path.endsWith('docs/workflow.json')) {
+            const patch = workflowPatchFromObject(tryParseJSON(content || text));
+            if (patch) return patch;
+        }
+        if (!state.workflow.active) return null;
+        if (path.endsWith('/docs/requirements.md') || path.endsWith('docs/requirements.md')) {
+            return { phase: 'requirements', status: 'running' };
+        }
+        if (path.endsWith('/docs/architecture.md') || path.endsWith('docs/architecture.md')) {
+            return { phase: 'architecture', status: 'running' };
+        }
+        if (path.includes('/src/') || /(^|\\|\/)src(\\|\/)/.test(path)) {
+            return { phase: 'implementation', status: 'running' };
+        }
+        if (lowerName === 'bash') {
+            return { phase: 'verification', status: 'running' };
+        }
+        return null;
+    }
+
+    function applyWorkflowFromToolStart(p) {
+        const patch = inferWorkflowPatchFromTool(p?.name, p?.input, false);
+        if (patch) applyWorkflowState(patch);
+    }
+
+    function applyWorkflowFromToolEnd(p) {
+        const patch = inferWorkflowPatchFromTool(p?.name, p?.output, true);
+        if (patch) applyWorkflowState(patch);
+    }
+
+    function rebuildWorkflowFromMessages(summary) {
+        resetWorkflowState();
+        applyWorkflowFromSummary(summary);
+        for (const msg of state.messages || []) {
+            if (msg.tool_call) {
+                applyWorkflowFromToolStart({ name: msg.tool_call.name, input: msg.tool_call.input });
+                applyWorkflowFromToolEnd({ name: msg.tool_call.name, output: msg.tool_call.output });
+            } else {
+                applyWorkflowFromText(msg.content || '');
+            }
+        }
+    }
+
     const SUBAGENT_STATUS_LABEL = {
         queued:    'queued',
         running:   'running',
@@ -684,8 +977,10 @@
 
     function onSessionList(p) {
         const sessions = p?.sessions || [];
+        state.sessions = sessions;
         renderSessionList(sessions);
         if (state.sessionsTableActive) {
+            state.sessionsTableSessions = sessions;
             renderSessionsTable(sessions);
         }
     }
@@ -704,6 +999,7 @@
         state._subAgentById = {};
         state._activeSubAgentIds = {};
         closeClarificationModal();
+        rebuildWorkflowFromMessages(p.summary);
         renderAllMessages();
         updateSessionHeader(p.summary);
         // 同步模型名（后端在 session_loaded 中带回 model 字段）
@@ -727,6 +1023,15 @@
     // 因此这里只需要刷新一次会话列表即可，无需再处理消息区。
     function onSessionDeleted(p) {
         if (!p) return;
+        const deletedID = String(p.deleted_id || p.deletedID || '').trim();
+        if (deletedID) {
+            state.sessions = (state.sessions || []).filter(s => s && s.id !== deletedID);
+            renderSessionList(state.sessions);
+            if (state.sessionsTableActive) {
+                state.sessionsTableSessions = (state.sessionsTableSessions || []).filter(s => s && s.id !== deletedID);
+                renderSessionsTable(state.sessionsTableSessions);
+            }
+        }
         // 不论删除的是不是当前会话，都需要刷新一次列表
         sendWS(MsgType.ListSessions, {});
     }
@@ -865,6 +1170,14 @@
         }
     }
 
+    function loadProjectPreviewCollapsed() {
+        try {
+            return localStorage.getItem('metaatoms-project-preview-collapsed') === 'true';
+        } catch {
+            return false;
+        }
+    }
+
     function setProjectPanelCollapsed(collapsed, options = {}) {
         const next = !!collapsed;
         state.projectPanelCollapsed = next;
@@ -880,6 +1193,28 @@
                 localStorage.setItem('metaatoms-project-panel-collapsed', next ? 'true' : 'false');
             } catch { /* ignore storage failures */ }
         }
+    }
+
+    function setProjectPreviewCollapsed(collapsed, options = {}) {
+        const next = !!collapsed;
+        state.projectPreviewCollapsed = next;
+        if (dom.app) dom.app.classList.toggle('is-project-preview-collapsed', next);
+        if (dom.projectPanel) dom.projectPanel.classList.toggle('is-preview-collapsed', next);
+        if (dom.projectWorkspacePreviewCollapse) {
+            dom.projectWorkspacePreviewCollapse.setAttribute('aria-expanded', next ? 'false' : 'true');
+            dom.projectWorkspacePreviewCollapse.title = next ? 'Expand preview' : 'Collapse preview';
+            dom.projectWorkspacePreviewCollapse.setAttribute('aria-label', dom.projectWorkspacePreviewCollapse.title);
+        }
+        if (options.persist !== false) {
+            try {
+                localStorage.setItem('metaatoms-project-preview-collapsed', next ? 'true' : 'false');
+            } catch { /* ignore storage failures */ }
+        }
+    }
+
+    function collapseConversationSidePanels() {
+        setSidebarCollapsed(true);
+        setProjectPreviewCollapsed(true);
     }
 
     function setProjectChrome(scope) {
@@ -975,7 +1310,7 @@
         const previewPath = normalizeProjectPath(state.projectWorkspacePreviewPath || '');
         const editingSettingPreview = previewScope === 'setting' && state.projectWorkspacePreviewEditing;
         if (previewPath && scopes.has(previewScope) && !editingSettingPreview) {
-            openProjectWorkspaceFile(previewPath);
+            openProjectWorkspaceFile(previewPath, { revealPreview: false });
         }
 
         if (state.projectGitLoaded && scopes.has('workspace')) {
@@ -1123,7 +1458,7 @@
             dom.projectFileList.appendChild(buildProjectEntryItem(entry));
         });
         if (projectOpen) {
-            maybeOpenFirstWorkspaceFile(entries);
+            syncWorkspacePreviewSelection(entries);
         } else {
             clearWorkspacePreview();
         }
@@ -1809,25 +2144,20 @@
         state.projectWorkspaceFilePending = null;
     }
 
-    function maybeOpenFirstWorkspaceFile(entries) {
+    function syncWorkspacePreviewSelection(entries) {
         const files = Array.isArray(entries) ? entries.filter(entry => entry?.type !== 'directory') : [];
         const selected = normalizeProjectPath(state.projectWorkspacePreviewPath);
         if (selected && state.projectWorkspacePreviewScope === state.projectScope && files.some(entry => normalizeProjectPath(entry.path) === selected)) {
             markWorkspacePreviewSelection(selected);
             return;
         }
-        const firstPreviewable = files.find(entry => entry.previewable !== false) || files[0];
-        if (firstPreviewable) {
-            openProjectWorkspaceFile(firstPreviewable.path);
-            return;
-        }
-        state.projectWorkspacePreviewPath = '';
-        renderWorkspacePreviewState('placeholder', 'Select a file to preview.');
+        clearWorkspacePreview();
     }
 
-    function openProjectWorkspaceFile(path) {
+    function openProjectWorkspaceFile(path, options = {}) {
         const filePath = normalizeProjectPath(path);
         if (!dom.projectWorkspacePreview || !filePath) return;
+        if (options.revealPreview !== false) setProjectPreviewCollapsed(false);
         const scope = state.projectScope || currentProjectScope();
         clearProjectWorkspaceFilePending();
         state.projectWorkspacePreviewPath = filePath;
@@ -1862,6 +2192,7 @@
         updateWorkspacePreviewMeta({}, '');
         if (dom.projectWorkspacePreviewSave) dom.projectWorkspacePreviewSave.hidden = true;
         renderWorkspacePreviewState('placeholder', 'Select a file to preview.');
+        setProjectPreviewCollapsed(true, { persist: false });
     }
 
     function updateWorkspacePreviewMeta(file, reason) {
@@ -2235,12 +2566,7 @@
 
         const selectedPath = normalizeProjectPath(state.projectWorkspacePreviewPath);
         if (selectedPath === deletedPath || selectedPath.startsWith(`${deletedPath}/`)) {
-            clearProjectWorkspaceFilePending();
-            state.projectWorkspacePreviewPath = '';
-            state.projectWorkspacePreviewFile = null;
-            state.projectWorkspacePreviewContent = '';
-            state.projectWorkspacePreviewEditing = false;
-            renderWorkspacePreviewState('placeholder', 'Select a file to preview.');
+            clearWorkspacePreview();
         }
 
         const parentPath = normalizeProjectPath(deletedPath.split('/').slice(0, -1).join('/'));
@@ -2468,6 +2794,7 @@
         if (state.projectPanelBound) return;
         state.projectPanelBound = true;
         setProjectPanelCollapsed(loadProjectPanelCollapsed(), { persist: false });
+        setProjectPreviewCollapsed(normalizeProjectPath(state.projectWorkspacePreviewPath) ? loadProjectPreviewCollapsed() : true, { persist: false });
         const actions = document.querySelector('.project-panel-actions');
         if (dom.projectPanelTabs && actions && actions.parentElement !== dom.projectPanelTabs) {
             dom.projectPanelTabs.appendChild(actions);
@@ -2494,6 +2821,16 @@
         }
         if (dom.projectCollapseBtn) {
             dom.projectCollapseBtn.addEventListener('click', () => setProjectPanelCollapsed(!state.projectPanelCollapsed));
+        }
+        if (dom.projectWorkspacePreviewCollapse) {
+            dom.projectWorkspacePreviewCollapse.addEventListener('click', () => {
+                const hasSelectedPreview = !!normalizeProjectPath(state.projectWorkspacePreviewPath);
+                if (state.projectPreviewCollapsed && !hasSelectedPreview) {
+                    setProjectPreviewCollapsed(true, { persist: false });
+                    return;
+                }
+                setProjectPreviewCollapsed(!state.projectPreviewCollapsed);
+            });
         }
         if (dom.projectNewFileBtn) {
             dom.projectNewFileBtn.addEventListener('click', newProjectSettingFile);
@@ -2543,6 +2880,7 @@
     // 时直接插入一个"已完成"块（兜底）。
     function onToolCallStart(p) {
         if (!p || !p.tool_use_id) return;
+        applyWorkflowFromToolStart(p);
         if (shouldSuppressToolCallDisplay(p.name)) {
             finalizeAssistantMessage();
             state._suppressedToolById[p.tool_use_id] = true;
@@ -2562,6 +2900,7 @@
 
     function onToolCallEnd(p) {
         if (!p || !p.tool_use_id) return;
+        applyWorkflowFromToolEnd(p);
         if (state._suppressedToolById[p.tool_use_id] || shouldSuppressToolCallDisplay(p.name)) {
             delete state._suppressedToolById[p.tool_use_id];
             return;
@@ -3258,6 +3597,7 @@
         // 标记为表格视图：onSessionList 收到响应时会渲染表格
         state.sessionsTableActive = true;
         getSessionsTableEl();
+        state.sessionsTableSessions = [];
         sendWS(MsgType.ListSessions, { mode: 'table' });
     }
 
@@ -4313,6 +4653,7 @@
         // 3. 对已渲染的内容执行最终增强：hljs 语法高亮、代码块 header（复制按钮）、JSON 校验
         enhanceCodeBlocks(bubble);
         maybeOpenClarificationModal(text);
+        applyWorkflowFromText(text);
 
         // 4. 固化为普通消息
         state.messages.push({ role: 'assistant', content: text });
@@ -5129,8 +5470,15 @@
         if (state.sessionsTableActive) {
             hideSessionsTable();
         }
+        const startsConversation = !state.messages.some(m => m && (m.role === 'user' || m.role === 'assistant'));
+        if (startsConversation) {
+            collapseConversationSidePanels();
+        }
         const empty = dom.messages.querySelector('.messages-empty');
         if (empty) empty.remove();
+        if (raw.trim().startsWith('/product-delivery')) {
+            applyWorkflowState({ active: true, phase: 'initialization', status: 'running' });
+        }
         state.messages.push({ role: 'user', content: raw });
         appendMessageNode('user', raw, false);
         scrollToBottomIfNeeded();
@@ -5157,8 +5505,15 @@
         if (state.sessionsTableActive) {
             hideSessionsTable();
         }
+        const startsConversation = !state.messages.some(m => m && (m.role === 'user' || m.role === 'assistant'));
+        if (startsConversation) {
+            collapseConversationSidePanels();
+        }
         const empty = dom.messages.querySelector('.messages-empty');
         if (empty) empty.remove();
+        if (String(text || '').trim().startsWith('/product-delivery')) {
+            applyWorkflowState({ active: true, phase: 'initialization', status: 'running' });
+        }
         state.messages.push({ role: 'user', content: text });
         appendMessageNode('user', text, false);
         scrollToBottomIfNeeded();
@@ -5446,6 +5801,7 @@
         renderSendButton();
         renderEmptyState();
         renderCtxBar();
+        renderWorkflowStepper();
         // 默认状态 idle
         setAgentStatus('idle');
         // 占位显示

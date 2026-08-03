@@ -628,7 +628,7 @@ func (h *Handler) runStream(ctx context.Context, conn *websocket.Conn, userInput
 			_ = h.sendToolCallEnd(conn, ToolCallEndPayload{
 				ToolUseID:  evt.ToolUseID,
 				Name:       evt.Name,
-				Output:     SummarizeOutput(evt.Output),
+				Output:     SummarizeOutput(ToolEventDisplayOutput(evt)),
 				IsError:    evt.IsError,
 				DurationMs: evt.DurationMs,
 				Status:     mapToolEventStatus(evt.Status),

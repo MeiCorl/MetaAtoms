@@ -216,6 +216,10 @@ body {
     grid-template-columns: 44px minmax(320px, 1fr) var(--project-panel-w);
 }
 
+#app.is-workspace-project-open.is-project-preview-collapsed:not(.is-project-panel-collapsed) {
+    --project-panel-w: min(340px, 36vw);
+}
+
 /* ============================================================================
  * Top Bar — 顶部信息栏
  * ========================================================================== */
@@ -798,6 +802,117 @@ body {
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--fg-dim);
+}
+
+/* product-delivery 五步工作流进度 */
+.workflow-stepper {
+    flex-shrink: 0;
+    display: grid;
+    grid-template-columns: minmax(132px, 180px) minmax(0, 1fr);
+    align-items: center;
+    gap: var(--sp-4);
+    padding: var(--sp-3) var(--sp-6);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+}
+
+.workflow-stepper-meta {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.workflow-stepper-title {
+    color: var(--fg-muted);
+    font: 650 var(--fs-xs) / 1.2 var(--font-display);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.workflow-stepper-current {
+    color: var(--fg-dim);
+    font: 500 var(--fs-xs) / 1.35 var(--font-mono);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.workflow-steps {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: var(--sp-2);
+    list-style: none;
+}
+
+.workflow-step {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    align-items: center;
+    gap: var(--sp-2);
+    padding: 7px 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    background: var(--bg-elevated);
+    color: var(--fg-dim);
+}
+
+.workflow-step-index {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    border: 1px solid var(--border-strong);
+    color: var(--fg-dim);
+    font: 700 11px / 1 var(--font-mono);
+}
+
+.workflow-step-label {
+    min-width: 0;
+    color: inherit;
+    font: 600 var(--fs-xs) / 1.25 var(--font-body);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.workflow-step.is-complete {
+    border-color: rgba(152, 195, 121, 0.35);
+    background: var(--success-dim);
+    color: var(--success);
+}
+
+.workflow-step.is-complete .workflow-step-index {
+    border-color: var(--success);
+    background: var(--success);
+    color: #08110b;
+}
+
+.workflow-step.is-active {
+    border-color: rgba(97, 175, 239, 0.44);
+    background: var(--thinking-dim);
+    color: var(--fg);
+}
+
+.workflow-step.is-active .workflow-step-index {
+    border-color: var(--thinking);
+    color: var(--thinking);
+    box-shadow: 0 0 0 3px var(--thinking-dim);
+}
+
+.workflow-step.is-blocked {
+    border-color: rgba(224, 108, 117, 0.42);
+    background: var(--error-dim);
+    color: var(--error);
+}
+
+.workflow-step.is-blocked .workflow-step-index {
+    border-color: var(--error);
+    color: var(--error);
 }
 
 /* —— 消息流 —— */
@@ -2741,6 +2856,74 @@ body {
     overflow: hidden;
 }
 
+.project-workspace-preview-collapse {
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    padding: 0;
+    color: var(--fg-muted);
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    transition: color var(--dur-fast) var(--ease-out),
+                background var(--dur-fast) var(--ease-out),
+                border-color var(--dur-fast) var(--ease-out);
+}
+
+.project-workspace-preview-collapse:hover {
+    color: var(--accent-bright);
+    border-color: var(--accent);
+    background: var(--accent-dim);
+}
+
+.project-workspace-preview-collapse:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.project-file-panel.is-workspace-project.is-preview-collapsed {
+    grid-template-columns: minmax(240px, 1fr) 40px;
+}
+
+.project-file-panel.is-workspace-project.is-preview-collapsed #project-tab-files {
+    grid-template-columns: minmax(240px, 1fr) 40px;
+}
+
+.project-file-panel.is-workspace-project.is-preview-collapsed .project-workspace-preview {
+    background: var(--bg-elevated);
+    border-left: 1px solid var(--border);
+}
+
+.project-file-panel.is-workspace-project.is-preview-collapsed .project-workspace-preview-header {
+    height: var(--project-tabs-h);
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-bottom: 0;
+}
+
+.project-file-panel.is-workspace-project.is-preview-collapsed .project-workspace-preview-title-wrap,
+.project-file-panel.is-workspace-project.is-preview-collapsed .project-workspace-preview-meta,
+.project-file-panel.is-workspace-project.is-preview-collapsed .project-workspace-preview-body,
+.project-file-panel.is-workspace-project.is-preview-collapsed #project-workspace-preview-save {
+    display: none;
+}
+
+.project-file-panel.is-workspace-project.is-preview-collapsed .project-workspace-preview-collapse {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    border-radius: 0;
+}
+
+.project-file-panel.is-workspace-project.is-preview-collapsed .project-workspace-preview-collapse svg {
+    transform: rotate(180deg);
+}
+
 .project-workspace-preview-header {
     display: flex;
     align-items: flex-start;
@@ -3608,6 +3791,27 @@ body {
      * 148px 与桌面端一致即可满足；此处仅收紧水平 padding 适配窄屏。 */
     :root { --sidebar-w: 192px; --inputbar-h: 148px; }
     .messages { padding: var(--sp-4) var(--sp-5); }
+    .workflow-stepper {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+        gap: var(--sp-2);
+        padding: var(--sp-3) var(--sp-5);
+    }
+    .workflow-stepper-meta {
+        flex-direction: row;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--sp-3);
+    }
+    .workflow-steps {
+        display: flex;
+        overflow-x: auto;
+        padding-bottom: 2px;
+    }
+    .workflow-step {
+        width: 180px;
+        flex: 0 0 180px;
+    }
     .inputbar { padding: var(--sp-3) var(--sp-4) var(--sp-3); }
     .sessions-table { padding: var(--sp-4) var(--sp-5) var(--sp-3); }
     .sessions-table-tbl .col-count { display: none; }
@@ -3623,6 +3827,8 @@ body {
     :root { --sidebar-w: 160px; --inputbar-h: 148px; }
     .topbar-meta { display: none; }
     .user-menu-button { max-width: 132px; }
+    .workflow-stepper { padding-left: var(--sp-3); padding-right: var(--sp-3); }
+    .workflow-step { width: 160px; flex-basis: 160px; }
     .inputbar-hint { display: none; }
     .inputbar-stat { font-size: 12px; gap: 0; padding: var(--sp-1) var(--sp-1); }
     .slash-dropdown { width: calc(100vw - var(--sidebar-w) - var(--sp-5)); min-width: 0; left: var(--sp-3); }
@@ -3651,6 +3857,19 @@ body {
     .project-workspace-preview {
         grid-column: 1;
         grid-row: 3;
+    }
+    .project-file-panel.is-workspace-project.is-preview-collapsed {
+        grid-template-columns: minmax(0, 1fr);
+    }
+    .project-file-panel.is-workspace-project.is-preview-collapsed #project-tab-files {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: var(--project-tabs-h) minmax(0, 1fr) 40px;
+    }
+    .project-file-panel.is-workspace-project.is-preview-collapsed .project-workspace-preview {
+        grid-column: 1;
+        grid-row: 3;
+        border-left: 0;
+        border-top: 1px solid var(--border);
     }
 }
 

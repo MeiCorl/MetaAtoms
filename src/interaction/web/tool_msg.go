@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+
+	"github.com/metaatoms/metaatoms/src/engine/conversation"
 )
 
 // 工具消息渲染相关的辅助函数。集中放在 tool_msg.go 是为了与 protocol.go
@@ -44,6 +46,20 @@ func SummarizeInput(input json.RawMessage) string {
 // 超长时追加 "..." 标记，方便用户识别"还有更多内容"。
 func SummarizeOutput(output string) string {
 	return truncateByRune(output, OutputSummaryMaxLen)
+}
+
+// ToolEventDisplayOutput 返回实时工具结束事件应展示给前端的 output 文本。
+// ToolHandler 为了给 LLM 反馈错误，会把 err 写进 ToolResultBlock.Content；但
+// ToolExecutionEvent 的 Output 与 ErrorMsg 是分开的。WebUI 的工具块只有一个
+// output 展示区，因此失败时需要把错误文本补进去，避免出现 failed 但空白输出。
+func ToolEventDisplayOutput(evt conversation.ToolExecutionEvent) string {
+	if !evt.IsError || strings.TrimSpace(evt.ErrorMsg) == "" {
+		return evt.Output
+	}
+	if strings.TrimSpace(evt.Output) == "" {
+		return evt.ErrorMsg
+	}
+	return evt.Output + "\n\nError: " + evt.ErrorMsg
 }
 
 // ToolDisplayFromExecution 把 ToolExecutionEvent 转为前端展示用的 ToolCallDisplay。

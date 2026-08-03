@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/metaatoms/metaatoms/src/engine/conversation"
 	"github.com/metaatoms/metaatoms/src/llm"
 )
 
@@ -81,6 +82,31 @@ func TestSummarizeOutput_MultibyteSafe(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "...") {
 		t.Errorf("超长应追加 '...', 实际: %q", got)
+	}
+}
+
+// TestToolEventDisplayOutput_ErrorFallback 验证失败事件即使没有 output，也展示错误文本。
+func TestToolEventDisplayOutput_ErrorFallback(t *testing.T) {
+	evt := conversation.ToolExecutionEvent{
+		IsError:  true,
+		ErrorMsg: "未在文件中找到 old_string 指定的内容",
+	}
+	got := ToolEventDisplayOutput(evt)
+	if got != evt.ErrorMsg {
+		t.Errorf("失败事件应展示 ErrorMsg: got=%q, want=%q", got, evt.ErrorMsg)
+	}
+}
+
+// TestToolEventDisplayOutput_ErrorWithPartialOutput 验证失败事件保留部分输出并追加错误。
+func TestToolEventDisplayOutput_ErrorWithPartialOutput(t *testing.T) {
+	evt := conversation.ToolExecutionEvent{
+		Output:   "partial stdout",
+		IsError:  true,
+		ErrorMsg: "exit status 1",
+	}
+	got := ToolEventDisplayOutput(evt)
+	if !strings.Contains(got, "partial stdout") || !strings.Contains(got, "exit status 1") {
+		t.Errorf("应同时包含部分输出与错误: %q", got)
 	}
 }
 
