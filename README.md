@@ -4,7 +4,7 @@ MetaAtoms 是一款面向多租户云端场景的 AI Coding Agent。它参考 [M
 
 项目目标是让用户从一个产品想法出发，通过多智能体协作完成需求澄清、架构规划、代码实现、测试、预览和源码交付。当前服务以 HTTP + WebSocket 形式提供浏览器交互入口，用户数据统一落在 `~/.metaatoms/<user_id>/` 下，工具执行与文件访问被限制在当前租户目录内。
 
-MetaAtoms WebUI
+<img src="./images/UI.png" alt="MetaAtoms WebUI" width="100%" />
 
 ## 项目架构
 
