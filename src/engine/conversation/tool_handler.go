@@ -71,7 +71,7 @@ func (e *ErrToolNotFound) Error() string {
 // 同时通过 OnStart/OnEnd 回调把执行事件外推，供上层（WebUI）
 // 推送 tool_call_start / tool_call_end 消息。
 //
-// 工具自身的安全兜底（路径沙箱、Bash 黑名单）由 builtin 包
+// 工具自身的安全兜底（路径沙箱、Bash 黑名单与路径预检）由 builtin 包
 // 内部完成；ToolHandler 不再重复校验，**也不提供任何方式关闭**。
 type ToolHandler struct {
 	// registry 用于按 Name 查找 Tool 实例；为 nil 时所有工具调用都报 ErrToolNotFound
@@ -119,7 +119,7 @@ func NewToolHandler(registry *tool.Registry, timeout time.Duration, workdir stri
 // NewIsolatedToolHandler 构造带独立权限状态的 ToolHandler。
 //
 // 该辅助用于 SubAgent:调用方传入已经过滤好的工具 Registry 与隔离 Checker,
-// 本函数负责装配独立 Interceptor 和 SandboxMiddleware。沙箱、Bash 黑名单与
+// 本函数负责装配独立 Interceptor 和 SandboxMiddleware。沙箱、Bash 黑名单/路径预检与
 // 路径越界策略仍由 security 层执行;SubAgent 只通过 registry 收窄可见能力。
 func NewIsolatedToolHandler(
 	registry *tool.Registry,

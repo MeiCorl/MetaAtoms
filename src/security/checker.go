@@ -15,8 +15,8 @@ type Decision struct {
 }
 
 // Checker enforces MetaAtoms' cloud tenant boundary:
-// Bash commands must pass the hard blacklist, and file read/write tools must
-// stay inside the current user's directory.
+// Bash commands must pass the hard blacklist and path preflight, and file
+// read/write tools must stay inside the current user's directory.
 type Checker struct {
 	workdir string
 }
@@ -50,11 +50,11 @@ func (c *Checker) Decide(_ context.Context, toolName string, params map[string]i
 	if toolName == "Bash" {
 		cmd := extractStringParam(params, "command")
 		if cmd != "" {
-			if err := CheckBashCommand(cmd); err != nil {
-				return Decision{Allowed: false, Reason: "bash blacklist denied: " + err.Error(), Workdir: c.workdir}
+			if err := CheckBashCommandInSandbox(cmd, c.workdir); err != nil {
+				return Decision{Allowed: false, Reason: "bash sandbox denied: " + err.Error(), Workdir: c.workdir}
 			}
 		}
-		return Decision{Allowed: true, Reason: "bash allowed after blacklist check", Workdir: c.workdir}
+		return Decision{Allowed: true, Reason: "bash allowed after blacklist and path sandbox check", Workdir: c.workdir}
 	}
 	if paramKey, ok := IsPathTool(toolName); ok {
 		pathValue := extractStringParam(params, paramKey)

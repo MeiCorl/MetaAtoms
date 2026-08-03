@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/metaatoms/metaatoms/src/security"
 	"github.com/metaatoms/metaatoms/src/tool"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
@@ -50,7 +52,7 @@ func NewBashTool(defaultTimeout time.Duration) *BashTool {
 	return &BashTool{
 		BaseTool: tool.BaseTool{
 			ToolName:        BashName,
-			ToolDescription: "在宿主 shell 中执行一条命令，捕获 stdout/stderr/exit code。支持管道、重定向、复合命令。带超时控制（默认 30s）。危险命令（rm -rf /、mkfs、shutdown 等）会被黑名单拦截，不会执行。注意：当内置工具（ReadFile/WriteFile/EditFile/Grep/Glob）可以完成相同任务时，必须优先使用内置工具，仅在内置工具无法胜任时才使用 Bash。",
+			ToolDescription: "在宿主 shell 中执行一条命令，捕获 stdout/stderr/exit code。支持管道、重定向、复合命令。带超时控制（默认 30s）。危险命令（rm -rf /、mkfs、shutdown 等）会被黑名单拦截；命令中显式引用当前用户工作目录之外的路径也会被拒绝。注意：当内置工具（ReadFile/WriteFile/EditFile/Grep/Glob）可以完成相同任务时，必须优先使用内置工具，仅在内置工具无法胜任时才使用 Bash。",
 			ToolInputSchema: bashSchema,
 			ToolPermission:  tool.PermExec,
 		},
@@ -67,9 +69,18 @@ func (t *BashTool) Execute(parent context.Context, input json.RawMessage) (strin
 	if strings.TrimSpace(in.Command) == "" {
 		return "", errors.New("command 不能为空")
 	}
+	if err := security.CheckBashCommandInSandbox(in.Command, t.WorkingDir); err != nil {
+		return "", err
+	}
+	effectiveWorkdir := strings.TrimSpace(t.WorkingDir)
+	if effectiveWorkdir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			effectiveWorkdir = wd
+		}
+	}
 
-	// 黑名单检查已提升至拦截器层（security.Checker.Decide 硬安全预检），
-	// 此处不再重复检查。
+	// Defense-in-depth: keep the Bash sandbox in the tool itself so direct
+	// callers cannot bypass ToolHandler's security interceptor.
 
 	// 超时控制
 	timeout := t.DefaultTimeout
@@ -91,8 +102,9 @@ func (t *BashTool) Execute(parent context.Context, input json.RawMessage) (strin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedWriter{w: &stdout, n: bashMaxOutputBytes}
 	cmd.Stderr = &limitedWriter{w: &stderr, n: bashMaxOutputBytes}
-	if strings.TrimSpace(t.WorkingDir) != "" {
-		cmd.Dir = t.WorkingDir
+	if effectiveWorkdir != "" {
+		cmd.Dir = effectiveWorkdir
+		cmd.Env = security.SandboxedProcessEnv(os.Environ(), effectiveWorkdir)
 	}
 
 	err := cmd.Run()

@@ -145,7 +145,7 @@ func TestStaticSource_SafetyBoundaryMentions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble 失败: %v", err)
 	}
-	keywords := []string{"破坏性", "git hook", "命令注入", "SQL", "XSS"}
+	keywords := []string{"破坏性", "git hook", "命令注入", "SQL", "XSS", "USERPROFILE", "Bash/PowerShell"}
 	for _, kw := range keywords {
 		if !strings.Contains(section.Content, kw) {
 			t.Errorf("安全边界应包含关键词 %q", kw)

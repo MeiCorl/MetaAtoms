@@ -3,11 +3,25 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/metaatoms/metaatoms/src/security"
 )
+
+func bashInputJSON(t *testing.T, command string) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(bashInput{Command: command})
+	if err != nil {
+		t.Fatalf("marshal bash input: %v", err)
+	}
+	return raw
+}
 
 // TestBashSuccess 验证：执行成功命令返回 stdout + exit_code=0。
 func TestBashSuccess(t *testing.T) {
@@ -27,20 +41,89 @@ func TestBashSuccess(t *testing.T) {
 // TestBashFailure 验证：非零退出码命令被标记，stderr 出现在输出中。
 func TestBashFailure(t *testing.T) {
 	tool := NewBashTool(5 * time.Second)
+	tool.WorkingDir = t.TempDir()
 	// 使用跨平台兼容的失败命令：读取不存在的路径
 	var cmd string
 	if runtime.GOOS == "windows" {
-		cmd = `Get-ChildItem C:\nonexistent_path_for_test_xyz`
+		cmd = `Get-ChildItem .\nonexistent_path_for_test_xyz`
 	} else {
-		cmd = `ls /nonexistent_path_for_test 2>&1`
+		cmd = `ls ./nonexistent_path_for_test 2>&1`
 	}
-	out, err := tool.Execute(context.Background(), json.RawMessage(`{"command":"`+cmd+`"}`))
+	out, err := tool.Execute(context.Background(), bashInputJSON(t, cmd))
 	if err != nil {
 		// 失败时我们的实现仍返回文本而非 error（让 LLM 看到 stderr）
 		t.Logf("注意：实现选择返回文本而非 error, err=%v", err)
 	}
 	if !strings.Contains(out, "exit_code") {
 		t.Errorf("应包含 exit_code: %s", out)
+	}
+}
+
+func TestBashRejectsOutsideAbsolutePath(t *testing.T) {
+	sandbox := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0644); err != nil {
+		t.Fatalf("prepare outside file: %v", err)
+	}
+
+	tool := NewBashTool(5 * time.Second)
+	tool.WorkingDir = sandbox
+
+	var cmd string
+	if runtime.GOOS == "windows" {
+		cmd = `Get-Content -Path "` + outside + `"`
+	} else {
+		cmd = `cat "` + outside + `"`
+	}
+	_, err := tool.Execute(context.Background(), bashInputJSON(t, cmd))
+	if !errors.Is(err, security.ErrBashPathOutsideSandbox) {
+		t.Fatalf("outside absolute path should be rejected, got %v", err)
+	}
+}
+
+func TestBashRejectsHomeEnvPath(t *testing.T) {
+	if _, err := os.UserHomeDir(); err != nil {
+		t.Skipf("home dir unavailable: %v", err)
+	}
+
+	tool := NewBashTool(5 * time.Second)
+	tool.WorkingDir = t.TempDir()
+
+	var cmd string
+	if runtime.GOOS == "windows" {
+		cmd = `Get-Content -Path "$env:USERPROFILE\.metaatoms\user_data.dat"`
+	} else {
+		cmd = `cat "$HOME/.metaatoms/user_data.dat"`
+	}
+
+	_, err := tool.Execute(context.Background(), bashInputJSON(t, cmd))
+	if !errors.Is(err, security.ErrBashPathOutsideSandbox) {
+		t.Fatalf("home env path should be rejected, got %v", err)
+	}
+}
+
+func TestBashUsesSandboxedHomeEnv(t *testing.T) {
+	sandbox := t.TempDir()
+	wantSandbox := filepath.Clean(sandbox)
+	if resolved, err := filepath.EvalSymlinks(sandbox); err == nil {
+		wantSandbox = filepath.Clean(resolved)
+	}
+	tool := NewBashTool(5 * time.Second)
+	tool.WorkingDir = sandbox
+
+	var cmd string
+	if runtime.GOOS == "windows" {
+		cmd = `[Environment]::GetEnvironmentVariable('USERPROFILE')`
+	} else {
+		cmd = `printenv HOME`
+	}
+
+	out, err := tool.Execute(context.Background(), bashInputJSON(t, cmd))
+	if err != nil {
+		t.Fatalf("sandboxed env command failed: %v", err)
+	}
+	if !strings.Contains(out, wantSandbox) {
+		t.Fatalf("HOME/USERPROFILE should resolve to sandbox %q, got %s", wantSandbox, out)
 	}
 }
 

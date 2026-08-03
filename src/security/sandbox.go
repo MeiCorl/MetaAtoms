@@ -1,6 +1,6 @@
 // Package security 提供 MetaAtoms 的安全层，包括：
 //   - 路径沙箱（ResolveInSandbox / IsPathOutsideSandbox）
-//   - Bash 危险命令黑名单（CheckBashCommand）
+//   - Bash 危险命令黑名单与路径预检（CheckBashCommand / CheckBashCommandInSandbox）
 //   - 权限检查器（Checker / Interceptor）
 //
 // 本文件迁移自原 tool/safety/path.go，新增 IsPathOutsideSandbox 查询函数。
