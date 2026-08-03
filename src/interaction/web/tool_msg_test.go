@@ -109,6 +109,17 @@ func TestToolEventDisplayOutput_ErrorWithPartialOutput(t *testing.T) {
 		t.Errorf("应同时包含部分输出与错误: %q", got)
 	}
 }
+func TestShouldSuppressToolCallDisplay_EditFileOldStringMiss(t *testing.T) {
+	if !ShouldSuppressToolCallDisplay("EditFile", "未在文件中找到 old_string 指定的内容", true) {
+		t.Fatal("EditFile old_string 未命中错误应从 WebUI 工具卡片中隐藏")
+	}
+	if ShouldSuppressToolCallDisplay("EditFile", "old_string 在文件中出现了 2 次", true) {
+		t.Fatal("非可恢复的 EditFile 定位歧义错误不应隐藏")
+	}
+	if ShouldSuppressToolCallDisplay("ReadFile", "未在文件中找到 old_string 指定的内容", true) {
+		t.Fatal("非 EditFile 工具不应被该规则隐藏")
+	}
+}
 
 // TestBuildChatMessages_TextOnly 验证纯文本消息按原样转换。
 func TestBuildChatMessages_TextOnly(t *testing.T) {
@@ -179,6 +190,18 @@ func TestBuildChatMessages_ToolError(t *testing.T) {
 	}
 	if tc.Status != "error" {
 		t.Errorf("Status = %q, 期望 error", tc.Status)
+	}
+}
+func TestBuildChatMessages_SuppressesEditFileOldStringMiss(t *testing.T) {
+	tu := &llm.ToolUseBlock{ID: "edit-miss", Name: "EditFile", Input: json.RawMessage(`{"file_path":"a.go","old_string":"old","new_string":"new"}`)}
+	tr := &llm.ToolResultBlock{ToolUseID: "edit-miss", Content: "未在文件中找到 old_string 指定的内容", IsError: true}
+	msgs := []llm.Message{
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{tu}},
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{tr}},
+	}
+	out := buildChatMessages(msgs)
+	if len(out) != 0 {
+		t.Fatalf("EditFile old_string 未命中不应恢复为历史工具卡片: %+v", out)
 	}
 }
 

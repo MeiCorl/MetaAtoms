@@ -528,10 +528,14 @@ func (h *Handler) handleUserInput(conn *websocket.Conn, msg Message) error {
 	// 把用户消息加入历史
 	h.mu.Lock()
 	h.conv.AddUserMessage(p.Text)
+	// Persist the first user message immediately so Sessions shows the new conversation while the agent is still streaming.
+	// Later saves append only messages after persistedMsgCount, so this user message is not duplicated.
+	h.saveCurrentSessionLocked()
 	h.mu.Unlock()
 
 	// 状态切到 thinking
 	_ = h.sendStatusUpdate(conn, StatusThinking)
+	_ = h.sendSessionList(conn, "")
 
 	// 启动 goroutine 处理流式（传入本轮用户输入，供 Step 8 记忆回顾快照使用）
 	go h.runStream(acquired, conn, p.Text)
@@ -610,8 +614,9 @@ func (h *Handler) runStream(ctx context.Context, conn *websocket.Conn, userInput
 	// 注意：OnStart/OnEnd 内部会同步调回调，所以"工具开始→状态切到 tool_running
 	// →发 tool_call_start"三件事都在 ToolHandler.Execute 同步路径上完成。
 	if h.toolHandler != nil {
-		h.toolHandler.SetOnStart(func(evt conversation.ToolExecutionEvent) {
-			_ = h.sendStatusUpdate(conn, StatusToolRunning)
+		var delayedMu sync.Mutex
+		delayedStarts := make(map[string]conversation.ToolExecutionEvent)
+		sendStart := func(evt conversation.ToolExecutionEvent) {
 			_ = h.sendToolCallStart(conn, ToolCallStartPayload{
 				ToolUseID: evt.ToolUseID,
 				Name:      evt.Name,
@@ -619,12 +624,32 @@ func (h *Handler) runStream(ctx context.Context, conn *websocket.Conn, userInput
 				StartedAt: evt.StartedAt,
 				Server:    h.resolveMCPServerByToolName(evt.Name),
 			})
+		}
+		h.toolHandler.SetOnStart(func(evt conversation.ToolExecutionEvent) {
+			_ = h.sendStatusUpdate(conn, StatusToolRunning)
+			if ShouldDelayToolCallStart(evt) {
+				delayedMu.Lock()
+				delayedStarts[evt.ToolUseID] = evt
+				delayedMu.Unlock()
+				return
+			}
+			sendStart(evt)
 		})
 		h.toolHandler.SetOnEnd(func(evt conversation.ToolExecutionEvent) {
 			// OnEnd 之后，AgentLoop 会立刻发起下一轮 LLM；提前把状态切到
 			// StatusThinking，避免前端把"工具已结束但还在等 LLM 回复"
 			// 这段间隙误判为 idle。
 			_ = h.sendStatusUpdate(conn, StatusThinking)
+			delayedMu.Lock()
+			delayedStart, hasDelayedStart := delayedStarts[evt.ToolUseID]
+			delete(delayedStarts, evt.ToolUseID)
+			delayedMu.Unlock()
+			if ShouldSuppressToolEventDisplay(evt) {
+				return
+			}
+			if hasDelayedStart {
+				sendStart(delayedStart)
+			}
 			_ = h.sendToolCallEnd(conn, ToolCallEndPayload{
 				ToolUseID:  evt.ToolUseID,
 				Name:       evt.Name,
@@ -922,10 +947,13 @@ func (h *Handler) handleGetCurrentSession(conn *websocket.Conn, msg Message) err
 //   - 其他：按 UpdatedAt 降序、全部（侧边栏刷新、/resume 前缀匹配）
 func (h *Handler) handleListSessions(conn *websocket.Conn, msg Message) error {
 	p, _ := AsPayload[ListSessionsPayload](msg)
+	return h.sendSessionList(conn, p.Mode)
+}
 
+func (h *Handler) sendSessionList(conn *websocket.Conn, mode string) error {
 	var summaries []memsession.SessionSummary
 	var err error
-	if p.Mode == "table" {
+	if mode == "table" {
 		summaries, err = h.sessMgr.ListRecentSessions(10)
 	} else {
 		summaries, err = h.sessMgr.ListSessions()
@@ -2581,6 +2609,9 @@ func buildChatMessages(messages []llm.Message) []ChatMessage {
 				// 没有配对的 result（异常情况）：标记为 error
 				status = ToolCallStatusError
 				isErr = true
+			}
+			if ShouldSuppressToolCallDisplay(tu.Name, output, isErr) {
+				continue
 			}
 			display := ToolDisplayFromExecution(
 				tu.ID, tu.Name,

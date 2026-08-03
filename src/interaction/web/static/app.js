@@ -1595,6 +1595,15 @@
         if (dom.workspacePreviewModal) dom.workspacePreviewModal.hidden = true;
     }
 
+    function closeWorkspacePreviewIfUnder(path) {
+        const deleted = normalizeProjectPath(path);
+        const current = normalizeProjectPath(dom.workspacePreviewPath?.textContent || '');
+        if (!deleted || !current) return;
+        if (current === deleted || current.startsWith(`${deleted}/`)) {
+            closeWorkspacePreview();
+        }
+    }
+
     function buildWorkspacePreviewButton(path) {
         const action = document.createElement('span');
         action.className = 'project-file-action project-file-preview';
@@ -1693,6 +1702,16 @@
         btn.appendChild(main);
         const actions = document.createElement('span');
         actions.className = 'project-file-actions';
+        actions.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+        });
+        actions.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') {
+                ev.preventDefault();
+                ev.stopPropagation();
+            }
+        });
         if (canPreviewWorkspaceProject(entry)) {
             actions.appendChild(buildWorkspacePreviewButton(path));
         }
@@ -1762,6 +1781,16 @@
         too_large: '文件过大，未加载正文内容。',
         not_previewable: '该文件暂不支持预览。',
         read_error: '读取文件失败，请稍后重试。',
+    };
+
+    const PROJECT_DELETE_REASON_TEXT = {
+        invalid_payload: '删除请求格式无效。',
+        invalid_path: '删除路径无效，已拒绝删除。',
+        outside_workdir: '删除路径超出用户目录，已拒绝删除。',
+        invalid_scope: '文件区域无效，已拒绝删除。',
+        write_denied: '该项目不允许从这里删除。',
+        not_found: '项目不存在或已被删除。',
+        read_error: '删除失败，请稍后重试。',
     };
 
     function setProjectTab(tab, options = {}) {
@@ -2557,10 +2586,11 @@
         const file = p?.file || {};
         const deletedPath = normalizeProjectPath(file.path || pending?.path || '');
         if (!p || p.ok !== true) {
-            showCompactionToast(projectFileReasonText(p?.reason || 'read_error'), 'error');
+            showCompactionToast(projectDeleteReasonText(p?.reason || 'read_error'), 'error');
             return;
         }
 
+        closeWorkspacePreviewIfUnder(deletedPath);
         const selectedPath = normalizeProjectPath(state.projectWorkspacePreviewPath);
         if (selectedPath === deletedPath || selectedPath.startsWith(`${deletedPath}/`)) {
             clearWorkspacePreview();
@@ -2785,6 +2815,10 @@
 
     function projectFileReasonText(reason) {
         return PROJECT_FILE_REASON_TEXT[reason] || '无法预览该文件。';
+    }
+
+    function projectDeleteReasonText(reason) {
+        return PROJECT_DELETE_REASON_TEXT[reason] || PROJECT_DELETE_REASON_TEXT.read_error;
     }
 
     function bindProjectFilePanel() {

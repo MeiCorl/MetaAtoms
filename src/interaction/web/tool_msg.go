@@ -62,6 +62,34 @@ func ToolEventDisplayOutput(evt conversation.ToolExecutionEvent) string {
 	return evt.Output + "\n\nError: " + evt.ErrorMsg
 }
 
+// ShouldDelayToolCallStart hides EditFile's start event until the final result is
+// known. This lets the web layer suppress recoverable old_string misses without
+// ever rendering a transient failed card.
+func ShouldDelayToolCallStart(evt conversation.ToolExecutionEvent) bool {
+	return evt.Name == "EditFile"
+}
+
+// ShouldSuppressToolCallDisplay keeps recoverable EditFile old_string misses out
+// of the WebUI while still allowing the tool_result to flow back to the model.
+func ShouldSuppressToolCallDisplay(name, output string, isError bool) bool {
+	if !isError || name != "EditFile" {
+		return false
+	}
+	text := strings.TrimSpace(output)
+	if text == "" || !strings.Contains(text, "old_string") {
+		return false
+	}
+	lower := strings.ToLower(text)
+	return strings.Contains(text, "未在文件中找到") ||
+		strings.Contains(lower, "not found")
+}
+
+// ShouldSuppressToolEventDisplay is the event-level form used by the streaming
+// WebSocket path.
+func ShouldSuppressToolEventDisplay(evt conversation.ToolExecutionEvent) bool {
+	return ShouldSuppressToolCallDisplay(evt.Name, ToolEventDisplayOutput(evt), evt.IsError)
+}
+
 // ToolDisplayFromExecution 把 ToolExecutionEvent 转为前端展示用的 ToolCallDisplay。
 //
 // ToolCallDisplay 与 ToolCallEndPayload 字段几乎一致，独立类型是

@@ -324,6 +324,32 @@ func TestToolCallEndPayload_ErrorIncludesMessage(t *testing.T) {
 		t.Fatalf("Status = %q, 期望 error", p.Status)
 	}
 }
+func TestToolCallPayload_SuppressesEditFileOldStringMiss(t *testing.T) {
+	toolInst := &errorToolForTest{
+		err:              errors.New("未在文件中找到 old_string 指定的内容"),
+		toolNameOverride: "EditFile",
+	}
+	scripts := [][]llm.StreamChunk{
+		{{
+			Done:     true,
+			ToolUses: []llm.ToolUseBlock{{ID: "edit-miss", Name: "EditFile", Input: json.RawMessage(`{"file_path":"a.go","old_string":"old","new_string":"new"}`)}},
+		}},
+		{{Content: "handled", Done: true}},
+	}
+	r := newToolRig(t, scripts, toolInst)
+	r.client.WriteMessage(websocket.TextMessage, mustEncode(MsgTypeUserInput, UserInputPayload{Text: "fail"}))
+
+	msgs := r.recvAll(t, 2*time.Second)
+	if start := findByType(msgs, MsgTypeToolCallStart); start != nil {
+		t.Fatalf("EditFile old_string 未命中不应推送 tool_call_start: %+v", start)
+	}
+	if end := findByType(msgs, MsgTypeToolCallEnd); end != nil {
+		t.Fatalf("EditFile old_string 未命中不应推送 tool_call_end: %+v", end)
+	}
+	if atomic.LoadInt32(&r.mp.calls) < 2 {
+		t.Fatalf("错误仍应回传给模型并触发后续 LLM 修复轮次，实际调用次数: %d", atomic.LoadInt32(&r.mp.calls))
+	}
+}
 
 // TestStatusUpdateTransitions 验证状态机：thinking → tool_running → thinking → idle。
 func TestStatusUpdateTransitions(t *testing.T) {
@@ -637,7 +663,8 @@ type echoToolForTest struct {
 
 type errorToolForTest struct {
 	tool.BaseTool
-	err error
+	err              error
+	toolNameOverride string
 }
 
 func (e *echoToolForTest) Execute(_ context.Context, input json.RawMessage) (string, error) {
@@ -687,7 +714,12 @@ func (e *echoToolForTest) Permission() tool.ToolPermission { return tool.PermRea
 func (e *errorToolForTest) Execute(_ context.Context, _ json.RawMessage) (string, error) {
 	return "", e.err
 }
-func (e *errorToolForTest) Name() string        { return "errtool" }
+func (e *errorToolForTest) Name() string {
+	if e.toolNameOverride != "" {
+		return e.toolNameOverride
+	}
+	return "errtool"
+}
 func (e *errorToolForTest) Description() string { return "always fails" }
 func (e *errorToolForTest) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object"}`)

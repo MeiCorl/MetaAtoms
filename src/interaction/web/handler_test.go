@@ -284,6 +284,48 @@ func TestUserInputStreamsAndPersists(t *testing.T) {
 	}
 }
 
+func TestUserInputRefreshesSessionsBeforeStreamDone(t *testing.T) {
+	chunks := []llm.StreamChunk{
+		{Content: "delayed"},
+		{Done: true},
+	}
+	r := newTestRig(t, chunks)
+	r.mp.chunkDelay = 150 * time.Millisecond
+
+	r.send(t, MsgTypeUserInput, UserInputPayload{Text: "Hi early"})
+
+	deadline := time.Now().Add(2 * time.Second)
+	var gotList bool
+	for time.Now().Before(deadline) && !gotList {
+		msg := r.recv(t, time.Until(deadline))
+		switch msg.Type {
+		case MsgTypeStreamDone:
+			t.Fatal("session_list should arrive before stream_done")
+		case MsgTypeSessionList:
+			payload, _ := AsPayload[SessionListPayload](msg)
+			if len(payload.Sessions) != 1 {
+				t.Fatalf("Sessions count = %d, want 1", len(payload.Sessions))
+			}
+			summary := payload.Sessions[0]
+			if summary.ID != r.h.CurrentSessionID() {
+				t.Fatalf("Session ID = %q, want current %q", summary.ID, r.h.CurrentSessionID())
+			}
+			if summary.MessageCount != 1 {
+				t.Fatalf("MessageCount = %d, want 1", summary.MessageCount)
+			}
+			if summary.Preview != "Hi early" {
+				t.Fatalf("Preview = %q, want %q", summary.Preview, "Hi early")
+			}
+			gotList = true
+		}
+	}
+	if !gotList {
+		t.Fatal("did not receive session_list before timeout")
+	}
+
+	_, _ = r.recvWithFilter(t, MsgTypeStreamDone, 2*time.Second)
+}
+
 // TestAbortStreamStopsOngoing 验证流式过程中 abort_stream 立即中断。
 func TestAbortStreamStopsOngoing(t *testing.T) {
 	// 大量 chunk + 长延迟，模拟长时间流式
@@ -580,6 +622,51 @@ func TestNewSessionCreatesAndSavesCurrent(t *testing.T) {
 	}
 	if sessionCount < 1 {
 		t.Errorf("期望至少 1 个会话子目录，实际 %d", sessionCount)
+	}
+}
+
+func TestDeleteWorkspaceEmptyProjectDirectory(t *testing.T) {
+	sessionsDir := t.TempDir()
+	sm, err := session.NewSessionManagerWithDir(sessionsDir, handlerTestWorkdir)
+	if err != nil {
+		t.Fatalf("SessionManager init failed: %v", err)
+	}
+	userDir := t.TempDir()
+	projectDir := filepath.Join(userDir, "workspace", "empty-project")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("create empty project fixture: %v", err)
+	}
+
+	cfg := &config.Config{Provider: "anthropic", Model: "test", APIKey: "k", MaxTokens: 1024}
+	mp := &mockProvider{}
+	h := NewHandler(mp, sm, cfg, 10, nil, 100000, userDir, nil, nil, nil)
+	s := NewServer("127.0.0.1:0")
+	h.Register(s.Router())
+	ts := httptest.NewServer(http.HandlerFunc(s.ConnectionManager().HandleWS))
+	defer ts.Close()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/"
+	client, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial ws: %v", err)
+	}
+	defer client.Close()
+
+	r := &testRig{h: h, mp: mp, sessDir: sessionsDir, sessionsDir: sm.SessionsRoot(), sm: sm, srv: ts, client: client}
+	r.send(t, MsgTypeDeleteProjectEntry, DeleteProjectEntryPayload{Scope: ProjectFileScopeWorkspace, Path: "empty-project"})
+
+	msg, _ := r.recvWithFilter(t, MsgTypeProjectEntryDeleted, 2*time.Second)
+	payload, _ := AsPayload[ProjectFilePayload](msg)
+	if !payload.OK {
+		t.Fatalf("delete payload = %+v, want ok", payload)
+	}
+	if payload.Scope != ProjectFileScopeWorkspace {
+		t.Fatalf("scope = %q, want %q", payload.Scope, ProjectFileScopeWorkspace)
+	}
+	if payload.File.Path != "empty-project" || payload.File.Type != ProjectFileTypeDirectory {
+		t.Fatalf("file = %+v, want deleted empty project directory", payload.File)
+	}
+	if _, err := os.Stat(projectDir); !os.IsNotExist(err) {
+		t.Fatalf("empty project directory should be removed, stat err=%v", err)
 	}
 }
 

@@ -102,7 +102,7 @@ func (t *EditFileTool) Execute(ctx context.Context, input json.RawMessage) (stri
 	// 检查 old_string 是否存在
 	count := strings.Count(original, in.OldString)
 	if count == 0 {
-		return "", fmt.Errorf("未在文件中找到 old_string 指定的内容。请确认 old_string 与文件中的实际内容完全一致（包括缩进、空行等）")
+		return "", fmt.Errorf("未在文件中找到 old_string 指定的内容。请重新调用 ReadFile 读取文件最新内容，再基于最新内容重新执行 EditFile 或 WriteFile")
 	}
 	if count > 1 {
 		return "", fmt.Errorf("old_string 在文件中出现了 %d 次，无法唯一定位。请扩大 old_string 的上下文范围使其唯一匹配", count)
