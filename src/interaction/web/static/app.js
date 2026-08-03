@@ -423,9 +423,7 @@
     }
 
     function bindSidebarCollapse() {
-        let collapsed = false;
-        try { collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'; } catch (_) {}
-        setSidebarCollapsed(collapsed, { persist: false });
+        setSidebarCollapsed(false);
         if (!dom.sidebarCollapseBtn) return;
         dom.sidebarCollapseBtn.addEventListener('click', () => {
             const next = !dom.app?.classList.contains('is-sidebar-collapsed');
@@ -1213,7 +1211,6 @@
     }
 
     function collapseConversationSidePanels() {
-        setSidebarCollapsed(true);
         setProjectPreviewCollapsed(true);
     }
 
@@ -3874,6 +3871,8 @@
                 appendMessageNode(m.role, m.content, /*streaming=*/ false);
             }
         }
+        const pendingClarification = findPendingClarificationRequestText(state.messages);
+        if (pendingClarification) maybeOpenClarificationModal(pendingClarification);
         scrollToBottomIfNeeded();
     }
 
@@ -3903,6 +3902,8 @@
 
     function appendMessageNode(role, content, streaming) {
         const isUser = role === 'user';
+        if (isUser && parseClarificationAnswerPayload(content)) return null;
+
         const wrap = document.createElement('div');
         wrap.className = `message ${isUser ? 'message-user' : 'message-assistant'}`;
         wrap.dataset.role = role;
@@ -3931,7 +3932,9 @@
             if (streaming) {
                 bubble.textContent = content;
             } else {
-                bubble.innerHTML = renderMarkdown(content);
+                const displayContent = getClarificationDisplayText(content);
+                if (!displayContent) return null;
+                bubble.innerHTML = renderMarkdown(displayContent);
                 enhanceCodeBlocks(bubble);
             }
         }
@@ -4647,11 +4650,17 @@
 
         // 2. 最终渲染：使用 renderMarkdown（不带光标），确保最终内容干净
         if (text && bubble) {
-            bubble.innerHTML = renderMarkdown(text);
+            const displayText = getClarificationDisplayText(text);
+            if (displayText) {
+                bubble.innerHTML = renderMarkdown(displayText);
+            } else {
+                state._streamingWrap.remove();
+                state._streamingWrap = null;
+            }
         }
 
         // 3. 对已渲染的内容执行最终增强：hljs 语法高亮、代码块 header（复制按钮）、JSON 校验
-        enhanceCodeBlocks(bubble);
+        enhanceCodeBlocks(state._streamingWrap ? bubble : null);
         maybeOpenClarificationModal(text);
         applyWorkflowFromText(text);
 
@@ -4696,7 +4705,9 @@
         state._revealedLen = Math.min(state._revealedLen + speed, bufferLen);
 
         // 取已揭示部分的文本，走 Markdown 解析 + DOMPurify 过滤
-        const visibleText = state._streamingBuffer.substring(0, state._revealedLen);
+        const visibleText = getClarificationStreamingDisplayText(
+            state._streamingBuffer.substring(0, state._revealedLen)
+        );
         const bubble = state._streamingWrap.querySelector('.message-bubble');
         if (bubble) {
             const html = streamingRenderMarkdown(visibleText);
@@ -5035,6 +5046,115 @@
             if (payload) return payload;
         }
         return null;
+    }
+
+    function parseClarificationAnswerPayload(text) {
+        const candidates = [];
+        const trimmed = String(text || '').trim();
+        if (!trimmed) return null;
+        candidates.push(trimmed);
+
+        const fenceRe = /```(?:json)?\s*([\s\S]*?)```/gi;
+        let match;
+        while ((match = fenceRe.exec(trimmed)) !== null) {
+            candidates.push(match[1]);
+        }
+
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+        }
+
+        for (const candidate of candidates) {
+            const obj = tryParseJSON(candidate);
+            const payload = obj?.parsed_json || obj?.structured_output?.parsed_json || obj;
+            if (payload && payload.type === 'clarification_answers') return payload;
+        }
+        return null;
+    }
+
+    function findPendingClarificationRequestText(messages) {
+        let pending = '';
+        for (const msg of messages || []) {
+            if (!msg || msg.tool_call) continue;
+            if (msg.role === 'assistant' && parseClarificationPayload(msg.content)) {
+                pending = msg.content || '';
+            }
+            if (msg.role === 'user' && parseClarificationAnswerPayload(msg.content)) {
+                pending = '';
+            }
+        }
+        return pending;
+    }
+
+    function cleanupClarificationDisplayText(text) {
+        return String(text || '')
+            .replace(/[ \t]+\n/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+
+    function stripClarificationPayloadForDisplay(text) {
+        const raw = String(text || '');
+        if (!raw.trim()) return '';
+
+        let removed = false;
+        let display = raw.replace(/```(?:json)?\s*([\s\S]*?)```/gi, (fence, inner) => {
+            const payload = unwrapClarificationPayload(tryParseJSON(inner));
+            if (!payload) return fence;
+            removed = true;
+            return '';
+        });
+
+        if (unwrapClarificationPayload(tryParseJSON(display))) return '';
+
+        const firstBrace = display.indexOf('{');
+        const lastBrace = display.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            const candidate = display.slice(firstBrace, lastBrace + 1);
+            const payload = unwrapClarificationPayload(tryParseJSON(candidate));
+            if (payload) {
+                display = display.slice(0, firstBrace) + display.slice(lastBrace + 1);
+                removed = true;
+            }
+        }
+
+        return removed ? cleanupClarificationDisplayText(display) : raw;
+    }
+
+    function hasClarificationSignal(text) {
+        const raw = String(text || '');
+        return /"type"\s*:\s*"clarification_request"/i.test(raw)
+            || /"status"\s*:\s*"needs_clarification"/i.test(raw)
+            || (/"clarification_cards"\s*:/i.test(raw) && /product-delivery\//i.test(raw));
+    }
+
+    function stripLikelyStreamingClarificationJSON(text) {
+        const raw = String(text || '');
+        const fenceIndex = raw.search(/(^|\n)[ \t]{0,3}```(?:json)?/i);
+        if (fenceIndex >= 0 && hasClarificationSignal(raw.slice(fenceIndex))) {
+            return cleanupClarificationDisplayText(raw.slice(0, fenceIndex));
+        }
+
+        const firstBrace = raw.indexOf('{');
+        if (firstBrace >= 0 && hasClarificationSignal(raw.slice(firstBrace))) {
+            return cleanupClarificationDisplayText(raw.slice(0, firstBrace));
+        }
+
+        return raw;
+    }
+
+    function getClarificationDisplayText(text) {
+        return stripClarificationPayloadForDisplay(text);
+    }
+
+    function getClarificationStreamingDisplayText(text) {
+        const raw = String(text || '');
+        const display = stripClarificationPayloadForDisplay(raw);
+        if (display !== raw) return display;
+        if (!hasClarificationSignal(raw)) return raw;
+        return stripLikelyStreamingClarificationJSON(raw);
     }
 
     function normalizeClarificationCards(cards) {

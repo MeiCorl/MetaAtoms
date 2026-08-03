@@ -304,23 +304,23 @@ func (a *anonymousSource) Assemble(_ context.Context, _ sources.Env) (sources.Se
 // 供 builder 集成测试使用（Step 8 起替代 Step 4 时代的 Recall-based stubMemoryProvider——
 // 真实实现改为读 MEMORY.md 索引文件，Recall/Provider 抽象已废弃）。
 //
-// memIndex 为预写入项目级 MEMORY.md 的文本内容；空串表示无记忆（Source 注入空内容、
+// memIndex 为预写入用户级 MEMORY.md 的文本内容；空串表示无记忆（Source 注入空内容、
 // 但仍产出名为 "memory" 的 Stats 条目，让 WebUI 能区分「启用但无记忆」与「未注册」）。
-// 用户级根恒为空临时目录（不写 MEMORY.md），保证测试只受 memIndex 控制。
+// 全局基线根恒为空临时目录（不写 MEMORY.md），保证测试只受 memIndex 控制。
 func newTestMemoryIndexSource(t *testing.T, memIndex string) *sources.MemoryIndexSource {
 	t.Helper()
+	globalRoot := autolearn.UserMemoryRoot(t.TempDir())
 	userRoot := autolearn.UserMemoryRoot(t.TempDir())
-	projRoot := autolearn.ProjectMemoryRoot(t.TempDir())
 	if memIndex != "" {
-		if err := os.MkdirAll(projRoot, 0o755); err != nil {
-			t.Fatalf("创建项目级 memory 目录失败: %v", err)
+		if err := os.MkdirAll(userRoot, 0o755); err != nil {
+			t.Fatalf("创建用户级 memory 目录失败: %v", err)
 		}
-		if err := os.WriteFile(filepath.Join(projRoot, "MEMORY.md"), []byte(memIndex), 0o644); err != nil {
-			t.Fatalf("写项目级 MEMORY.md 失败: %v", err)
+		if err := os.WriteFile(filepath.Join(userRoot, "MEMORY.md"), []byte(memIndex), 0o644); err != nil {
+			t.Fatalf("写用户级 MEMORY.md 失败: %v", err)
 		}
 	}
 	return sources.NewMemoryIndexSource(
-		autolearn.NewStore(userRoot, projRoot),
+		autolearn.NewStore(globalRoot, userRoot),
 		sources.MemoryIndexOptions{Enabled: true},
 	)
 }
@@ -488,7 +488,7 @@ func TestBuilder_RealFourSources_MemoryWithIndex(t *testing.T) {
 	agentsSrc.HomeDirForTest = home
 	agentsSrc.GetwdForTest = func() (string, error) { return cwd, nil }
 
-	// 预置一条项目级记忆索引（格式与 autolearn.renderIndex 一致）
+	// 预置一条用户级记忆索引（格式与 autolearn.renderIndex 一致）
 	memIndex := "## user_preference\n- [user_preference](pref-tabs.md)——user prefers tabs\n"
 	b := NewBuilder(
 		sources.NewStaticSource(),

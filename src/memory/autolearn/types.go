@@ -5,7 +5,7 @@
 //   - 半静态记忆：AGENTS.md、环境信息（Step 4 已落地）
 //   - 自动学习记忆（本包）：Agent 在使用过程中由后台回顾器自主总结、按分类沉淀为
 //     独立 md 文件，跨会话持久化；新会话启动时通过 MEMORY.md 索引注入上下文，
-//     让 Agent「想起」之前沉淀的用户偏好、反馈、项目知识与参考信息。
+//     让 Agent「想起」之前沉淀的用户角色、用户偏好与用户反馈。
 //
 // 本包文件职责拆分：
 //   - types.go：数据模型（记忆类型、存储域、记忆记录、索引行）
@@ -17,64 +17,60 @@
 //
 // 存储布局：
 //
-//	~/.metaatoms/memory/            用户级（偏好 + 反馈，跨所有项目）
-//	  MEMORY.md                     索引（按 4 类分块，每行 - [type](slug.md)——简介）
+//	~/.metaatoms/memory/            全局只读基线
+//	  MEMORY.md                     索引（按 3 类分块，每行 - [type](slug.md)——简介）
 //	  <slug>.md                     单条记忆（YAML frontmatter + 正文）
-//	<cwd>/.metaatoms/memory/        项目级（项目知识 + 参考，跟随当前项目）
+//	~/.metaatoms/${user_id}/memory/ 用户级读写目录
 //	  MEMORY.md
 //	  <slug>.md
 package autolearn
 
 import "time"
 
-// MemoryType 记忆的四种分类。
+// MemoryType 记忆的三种用户级分类。
 //
-// 分类与存储域是固定映射（见 ScopeOf）：
-//   - 用户级（~/.metaatoms/memory/）：偏好、反馈——与具体项目无关，跨项目生效
-//   - 项目级（<cwd>/.metaatoms/memory/）：项目知识、参考——跟随项目目录
+// MetaAtoms 云端模式不再引入项目级记忆概念，自动学习只沉淀用户角色、用户偏好与用户反馈。
 //
-// 这四类也作为 MEMORY.md 索引的分块维度，渲染顺序见 memoryTypeOrder。
+// 这三类也作为 MEMORY.md 索引的分块维度，渲染顺序见 memoryTypeOrder。
 type MemoryType string
 
 const (
+	// MemoryTypeUserRole 用户角色：用户长期身份、职责、技能背景或工作领域
+	// （如“用户是独立开发者，主要做 SaaS 产品”）。归属用户级。
+	MemoryTypeUserRole MemoryType = "user_role"
+
 	// MemoryTypeUserPreference 用户偏好：用户明确表达的做事方式约定
-	// （如「缩进用 4 个空格，不要用 tab」）。归属用户级，跨所有项目生效。
+	// （如「缩进用 4 个空格，不要用 tab」）。归属用户级。
 	MemoryTypeUserPreference MemoryType = "user_preference"
 
 	// MemoryTypeUserFeedback 用户反馈：用户对 Agent 输出的纠正性反馈与正确做法
 	// （如「上次生成的代码漏了错误处理，应该在……处补上」）。归属用户级。
 	MemoryTypeUserFeedback MemoryType = "user_feedback"
-
-	// MemoryTypeProjectKnowledge 项目知识：关于当前项目的技术架构、部署运维、
-	// 内部约定等信息。归属项目级，跟随项目目录。
-	MemoryTypeProjectKnowledge MemoryType = "project_knowledge"
-
-	// MemoryTypeReference 参考信息：外部链接与资料（如某 API 文档地址、
-	// 内部 wiki 链接、DB 使用手册位置）。归属项目级。
-	MemoryTypeReference MemoryType = "reference"
 )
 
 // StorageScope 记忆的存储域。
 type StorageScope string
 
 const (
-	// ScopeUser 用户级：~/.metaatoms/memory/，跨所有项目生效。
+	// ScopeGlobal 全局只读基线：~/.metaatoms/memory/，由平台/管理员维护。
+	ScopeGlobal StorageScope = "global"
+
+	// ScopeUser 用户级：~/.metaatoms/${user_id}/memory/，承载自动学习写入。
 	ScopeUser StorageScope = "user"
 
-	// ScopeProject 项目级：<cwd>/.metaatoms/memory/，跟随当前项目。
-	ScopeProject StorageScope = "project"
+	// ScopeProject 已废弃，保留为 ScopeUser 的兼容别名；MetaAtoms 不再写入项目级记忆。
+	ScopeProject StorageScope = ScopeUser
 )
 
-// memoryTypeOrder 定义 4 类记忆在 MEMORY.md 索引中的分块渲染顺序。
+// memoryTypeOrder 定义 3 类记忆在 MEMORY.md 索引中的分块渲染顺序。
 // 顺序固定，保证索引文件在多次重写下仍稳定可读、可 diff，且 Source 注入顺序确定。
 var memoryTypeOrder = []MemoryType{
+	MemoryTypeUserRole,
 	MemoryTypeUserPreference,
 	MemoryTypeUserFeedback,
-	MemoryTypeProjectKnowledge,
-	MemoryTypeReference,
 }
 
-// AllMemoryTypes 返回全部 4 类记忆（按固定顺序的拷贝）。
+// AllMemoryTypes 返回全部 3 类记忆（按固定顺序的拷贝）。
 // 供索引渲染分块、回顾 prompt 列举分类等场景使用。返回拷贝避免外部误改包内顺序表。
 func AllMemoryTypes() []MemoryType {
 	out := make([]MemoryType, len(memoryTypeOrder))
@@ -82,7 +78,7 @@ func AllMemoryTypes() []MemoryType {
 	return out
 }
 
-// IsValidType 判断 t 是否为合法的 4 类之一。
+// IsValidType 判断 t 是否为合法的 3 类之一。
 // 用于校验回顾 LLM 产出的类型、解析历史索引时过滤未知标签，避免脏数据写入。
 func IsValidType(t MemoryType) bool {
 	for _, v := range memoryTypeOrder {
@@ -94,15 +90,9 @@ func IsValidType(t MemoryType) bool {
 }
 
 // ScopeOf 返回某类记忆应当归属的存储域。
-// 偏好 / 反馈 → 用户级；项目知识 / 参考 → 项目级。
-// t 非法时默认返回项目级（调用方应先用 IsValidType 校验，避免误用）。
+// MetaAtoms 的自动学习记忆全部归属用户级；t 非法时也保守返回用户级。
 func ScopeOf(t MemoryType) StorageScope {
-	switch t {
-	case MemoryTypeUserPreference, MemoryTypeUserFeedback:
-		return ScopeUser
-	default:
-		return ScopeProject
-	}
+	return ScopeUser
 }
 
 // Frontmatter 是单条记忆文件头部的 YAML frontmatter。
@@ -111,7 +101,7 @@ func ScopeOf(t MemoryType) StorageScope {
 // frontmatter，而是放在 --- 闭合标记之后的正文区——这样长文本与特殊字符
 // 无需经过 YAML 转义，既避免转义 bug，也让人可直接阅读编辑 md 文件。
 type Frontmatter struct {
-	// Type 记忆分类，取值限定为 4 类之一（IsValidType 校验）。
+	// Type 记忆分类，取值限定为 3 类之一（IsValidType 校验）。
 	Type MemoryType `yaml:"type"`
 	// Title 记忆标题（单行简述），供索引与人类阅读。
 	Title string `yaml:"title"`

@@ -1,8 +1,8 @@
 // Package sources（memory_index.go）实现「自动记忆索引注入」Source（Step 8 记忆系统）。
 //
-// 会话启动时读取用户级（~/.metaatoms/memory/MEMORY.md）+ 项目级（<cwd>/.metaatoms/memory/MEMORY.md）
+// 会话启动时读取全局基线（~/.metaatoms/memory/MEMORY.md）+ 用户级（~/.metaatoms/${user_id}/memory/MEMORY.md）
 // 两份记忆索引，合并、按体积上限截断后，作为 LeadUserMessage（Placement=UserMessage）注入上下文，
-// 让 LLM 在新会话开始即「想起」之前沉淀的用户偏好、反馈、项目知识与参考信息。
+// 让 LLM 在新会话开始即「想起」之前沉淀的用户角色、用户偏好与用户反馈。
 //
 // 与 AGENTS.md 注入同构：同为 LeadUserMessage、同样做体积截断 + 缺失降级；区别仅在数据来源
 // （AGENTS.md 读 H2 段落；本 Source 读 autolearn.Store 的索引条目）。
@@ -52,7 +52,7 @@ type MemoryIndexOptions struct {
 
 // MemoryIndexSource 实现 Source 接口，把 autolearn 两级记忆索引注入为 LeadUserMessage。
 //
-// 持有 autolearn.Store 引用（用户级/项目级根在 Store 构造时固化）与注入配置（opts）。
+// 持有 autolearn.Store 引用（全局基线/用户级根在 Store 构造时固化）与注入配置（opts）。
 // 无内部可变状态，可并发调用 Assemble。store 为 nil 或 Enabled=false 时（记忆未启用）
 // Assemble 返回空 Section，整体降级。
 type MemoryIndexSource struct {
@@ -64,7 +64,7 @@ type MemoryIndexSource struct {
 
 // NewMemoryIndexSource 构造一个记忆索引注入 Source。
 //
-// store 为 autolearn 记忆存储器（由主流程计算用户级/项目级根后构造并注入），传 nil
+// store 为 autolearn 记忆存储器（由主流程计算全局基线/用户级根后构造并注入），传 nil
 // 表示记忆依赖未就绪。opts 控制总开关与体积阈值；opts 中 MaxLines/MaxBytes <=0 时
 // 回退到包默认（200/25KB）。store==nil 或 opts.Enabled=false 时 Assemble 返回空 Section。
 func NewMemoryIndexSource(store *autolearn.Store, opts MemoryIndexOptions) *MemoryIndexSource {
@@ -91,8 +91,8 @@ func (s *MemoryIndexSource) Name() string { return "memory" }
 //
 // 行为约定：
 //  1. Enabled=false 或 store 为 nil → 返回空 Section（记忆关闭/未启用，不阻塞 SP 组装）
-//  2. 分别读项目级 + 用户级索引（任一读失败记 warn 并按空处理，不报错上抛）
-//  3. 合并渲染：项目级在前（与当前会话更相关），用户级在后，各自带域分组标签
+//  2. 分别读用户级 + 全局基线索引（任一读失败记 warn 并按空处理，不报错上抛）
+//  3. 合并渲染：用户级在前、全局基线在后，各自带域分组标签
 //  4. 体积截断（按注入的 maxLines/maxBytes，超限截断 + warn 日志）
 //  5. 外层包 <memory_index> 标签，Placement=UserMessage
 //  6. 两级索引均为空 → 返回空 Section（Builder 自动过滤，不产生空注入）
@@ -109,19 +109,19 @@ func (s *MemoryIndexSource) Assemble(_ context.Context, _ Env) (Section, error) 
 		}, nil
 	}
 
-	// 项目级在前、用户级在后读取；任一失败降级为空，不阻塞 SP 组装。
-	projEntries, err := s.store.ReadIndex(autolearn.ScopeProject)
-	if err != nil {
-		logger.Warn("memory: 读取项目级记忆索引失败，按空处理", zap.Error(err))
-		projEntries = nil
-	}
+	// 用户级在前、全局基线在后读取；任一失败降级为空，不阻塞 SP 组装。
 	userEntries, err := s.store.ReadIndex(autolearn.ScopeUser)
 	if err != nil {
 		logger.Warn("memory: 读取用户级记忆索引失败，按空处理", zap.Error(err))
 		userEntries = nil
 	}
+	globalEntries, err := s.store.ReadIndex(autolearn.ScopeGlobal)
+	if err != nil {
+		logger.Warn("memory: 读取全局基线记忆索引失败，按空处理", zap.Error(err))
+		globalEntries = nil
+	}
 
-	body := renderMemoryIndexBody(projEntries, userEntries)
+	body := renderMemoryIndexBody(globalEntries, userEntries)
 	if strings.TrimSpace(body) == "" {
 		// 两级均为空（首次启动 / 无记忆）→ 空 Section，让 Builder 过滤
 		return Section{
@@ -144,14 +144,14 @@ func (s *MemoryIndexSource) Assemble(_ context.Context, _ Env) (Section, error) 
 }
 
 // renderMemoryIndexBody 把两级索引渲染为带域分组标签的文本。
-// 项目级在前（与当前会话更相关），用户级在后；任一级为空则省略对应分组，避免空标签。
-func renderMemoryIndexBody(projEntries, userEntries []autolearn.IndexEntry) string {
+// 用户级在前、全局基线在后；任一级为空则省略对应分组，避免空标签。
+func renderMemoryIndexBody(globalEntries, userEntries []autolearn.IndexEntry) string {
 	var parts []string
-	if projText := autolearn.RenderEntries(projEntries); strings.TrimSpace(projText) != "" {
-		parts = append(parts, "项目级记忆：\n"+strings.TrimRight(projText, "\n"))
-	}
 	if userText := autolearn.RenderEntries(userEntries); strings.TrimSpace(userText) != "" {
 		parts = append(parts, "用户级记忆：\n"+strings.TrimRight(userText, "\n"))
+	}
+	if globalText := autolearn.RenderEntries(globalEntries); strings.TrimSpace(globalText) != "" {
+		parts = append(parts, "全局基线记忆：\n"+strings.TrimRight(globalText, "\n"))
 	}
 	return strings.Join(parts, "\n\n")
 }

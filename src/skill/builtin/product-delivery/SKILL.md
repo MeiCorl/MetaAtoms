@@ -14,23 +14,102 @@ description: 产品交付工作流。用于开发类需求，从用户想法生�
 
 ## 统一五步流程
 
-UI 和 Agent 行为都必须围绕下列五步对齐；任何阶段推进都要更新 `docs/workflow.json`。
+UI 和 Agent 行为都必须围绕下列五步对齐；每一步开始前都必须先声明当前准备进行的步骤，任何阶段推进都要更新 `docs/workflow.json`。
 
 1. 项目初始化：关联会话与项目，创建 `docs/`、`src/` 和初始 `workflow.json`。
-2. 需求分析：澄清范围，生成或更新 `docs/requirements.md`。
-3. 架构设计：生成或更新 `docs/architecture.md`，包含 Mermaid 架构图和关键流程时序图。
-4. 编码实现：实现应用源码、配置、资源和必要说明。
+2. 需求分析：澄清待确认点(如有)，生成或更新 `docs/requirements.md`。
+3. 架构设计：根据需求分析结果生成或更新 `docs/architecture.md`，包含必要Mermaid 架构图和关键流程时序图。
+4. 编码实现：根据需求分析和架构设计结果，制定实现计划并实现应用源码、配置、资源和必要说明。
 5. 基础验证：执行能运行的构建、启动、静态检查或人工验证记录，更新验证结果。
 
 
 
+## 编排规则
+
+
+
+### 1. 项目初始化
+
+新建 product-delivery 项目时，必须在任何目录创建或文件写入前先调用 `associate_project`，为项目分配最终唯一名称、预留项目根目录并关联当前会话。新项目调用时只传候选项目名：
+
+```json
+{"project_name":"${candidate_project_slug}"}
+```
+
+不要传 `project_path`、`workflow_id`、`workflow_path`；这些由工具根据最终唯一项目名自动生成。同名项目存在时，工具会返回 `project.name` 为 `${slug}-2`、`${slug}-3` 等唯一名称。
+
+工具返回后，写文件必须使用返回的 `project.path` 和 `project.workflow_path`；写入 `workflow.json` 和最终回复时，展示路径使用相对用户工作区的 `workspace/${project.name}`，不要输出云端绝对路径。然后在项目根目录下创建 `docs/`、`src/` 和 `docs/workflow.json`。初始化后将 `workflow.json.phase` 设为 `requirements`，`steps.initialization.status=completed`，`requirements.status=in_progress`。
+
+### 2. 需求分析
+
+分析用户需求并写 `docs/requirements.md`，必须包含产品目标、目标用户、核心场景、MVP 范围、不做范围、功能需求、非功能需求、验收标准、数据/权限/部署/兼容约束。
+
+若存在待确认点，不要自行假设，必须一次性输出可被前端识别的 `clarification_request` JSON，不要拆成多轮零散追问。该 JSON 必须包含 `schema_version`、`type`、`status`、`workflow_id`、`summary` 和 `clarification_cards`。用户提交 `type=clarification_answers` 后，写入 `workflow.json.clarifications.answers` 并继续，不要重复追问非阻塞细节。
+
+输出澄清卡片前，同步更新 `workflow.json.clarifications.status=waiting_user`，`cards=clarification_cards`；收到答案后更新 `status=answered`，`answers=<用户答案>`。待确认点卡牌 JSON 示例：
+
+```json
+{
+  "schema_version": "product-delivery/v1",
+  "type": "clarification_request",
+  "status": "needs_clarification",
+  "workflow_id": "breakout-game",
+  "docs_dir": "workspace/breakout-game/docs",
+  "summary": "当前需求可以判断为一个网页版打砖块小游戏，但玩法范围和交付边界仍需确认。",
+  "clarification_cards": [
+    {
+      "id": "scope",
+      "title": "范围选择",
+      "question": "这次先做到什么范围？",
+      "required": true,
+      "allow_custom": true,
+      "options": [
+        {
+          "value": "mvp",
+          "label": "MVP",
+          "description": "完成基础可玩版本，包含挡板、砖块、球、得分和失败重开。",
+          "recommended": true
+        },
+        {
+          "value": "full",
+          "label": "完整版",
+          "description": "在 MVP 上增加关卡、音效、排行榜或更多动效。",
+          "recommended": false
+        }
+      ]
+    }
+  ],
+  "notes": ["如果用户不选择，默认按 MVP 交付。"]
+}
+```
+
+
+
+### 3. 架构设计
+
+需求完成后根据需求要求写 `docs/architecture.md`。文件必须包含技术选型、目录结构、模块边界、状态管理、数据流、错误处理、可扩展点，且至少包含一个 Mermaid 架构图和一个 Mermaid 关键流程时序图。完成后更新 `workflow.json.phase=implementation`。
+
+### 4. 编码实现
+
+根据 `requirements.md` 和 `architecture.md` 完成源码、配置、资源和必要文档。源码、样式、脚本、静态资源只写入 `src/`。前端应用必须可直接体验，不要做只有说明文字的空壳页面。
+
+实现完成后更新 `workflow.json.phase=verification`。
+
+### 5. 基础验证
+
+能运行构建、格式化、静态检查或启动验证时，优先执行并记录命令。没有自动化条件时，记录人工检查路径和未覆盖风险。验证失败但不阻塞基础交付时，在 `workflow.json.risks` 和最终回复中说明；阻塞核心验收时标记 `workflow.json.status=blocked`。
+
 ## 通用约束
 
+- 开发类需求必须先进入本技能，且按五步流程推进。
 - 全链路统一使用 UTF-8。写入 Markdown、JSON、源代码、`workflow.json`、工具参数与工具返回都必须按 UTF-8 处理。
 - 读写文件优先使用 `ReadFile`、`WriteFile`、`EditFile`。
 - 必须通过 Bash/PowerShell 处理中文时，先显式设置 UTF-8，例如 `[Console]::InputEncoding=[Console]::OutputEncoding=[System.Text.Encoding]::UTF8`。
 - 不要把乱码内容写入文档、源码或最终 JSON；若读取时发现中文乱码，重新以 UTF-8 读取原始文件。
-- 不调用 SubAgent；不设置独立测试阶段。
+- 不调用 SubAgent；不使用 `Agent` / `task_status`；不设置独立测试阶段。
+- 不写 `tasks.md`、`checklists.md` 或 `delivery.md`。
+- 需求澄清必须一次性卡片化展示。
+- 需求、架构、实现、基础验证和交付都必须更新 `workflow.json`，保证可断点续做。
 
 
 
@@ -52,7 +131,7 @@ workspace/${project_name}/
       main.css
 ```
 
-`project_name` 使用短英文或拼音 slug。创建新项目时，先把候选 slug 传给 `associate_project`，且不要传 `project_path`，不要在调用前创建目录或写入文件。必须以工具返回的 `project.name`、`project.path`、`project.workflow_id`、`project.workflow_path` 作为最终路径依据。
+`project_name` 使用短英文或拼音 slug。创建新项目时，先把候选 slug 作为唯一参数传给 `associate_project`，不要传 `project_path`、`workflow_id`、`workflow_path`，不要在调用前创建目录或写入文件。必须以工具返回的 `project.name`、`project.path`、`project.workflow_id`、`project.workflow_path` 作为最终路径依据；真实文件写入用返回路径，`workflow.json` 和最终回复中的展示路径用 `workspace/${project.name}`。
 
 ## workflow.json 契约
 
@@ -93,40 +172,6 @@ workspace/${project_name}/
 
 
 
-## 编排规则
-
-
-
-### 1. 项目初始化
-
-先调用 `associate_project` 为新项目分配最终名称并关联会话。调用参数如下：
-
-```json
-{"project_name":"${candidate_project_slug}"}
-```
-
-工具返回后，创建 `docs/`、`src/` 和 `docs/workflow.json`。初始化后将 `workflow.json.phase` 设为 `requirements`，`steps.initialization.status=completed`，`requirements.status=in_progress`。
-
-### 2. 需求分析
-
-自行分析用户需求并写 `docs/requirements.md`，必须包含产品目标、目标用户、核心场景、MVP 范围、不做范围、功能需求、非功能需求、验收标准、数据/权限/部署/兼容约束。
-
-若关键信息不足，必须一次性输出可被前端识别的 `clarification_request` JSON，不要拆成多轮零散追问。该 JSON 必须包含 `schema_version`、`type`、`status`、`workflow_id`、`summary` 和 `clarification_cards`。用户提交 `type=clarification_answers` 后，写入 `workflow.json.clarifications.answers` 并继续，不要重复追问非阻塞细节。
-
-### 3. 架构设计
-
-需求完成后写 `docs/architecture.md`。文件必须包含技术选型、目录结构、模块边界、状态管理、数据流、错误处理、可扩展点，且至少包含一个 Mermaid 架构图和一个 Mermaid 关键流程时序图。完成后更新 `workflow.json.phase=implementation`。
-
-### 4. 编码实现
-
-根据 `requirements.md` 和 `architecture.md` 完成源码、配置、资源和必要文档。源码、样式、脚本、静态资源只写入 `src/`。前端应用必须可直接体验，不要做只有说明文字的空壳页面。
-
-实现完成后更新 `workflow.json.phase=verification`。
-
-### 5. 基础验证
-
-能运行构建、格式化、静态检查或启动验证时，优先执行并记录命令。没有自动化条件时，记录人工检查路径和未覆盖风险。验证失败但不阻塞基础交付时，在 `workflow.json.risks` 和最终回复中说明；阻塞核心验收时标记 `workflow.json.status=blocked`。
-
 ## 交付回复
 
 验证完成后将 `workflow.json.status` 更新为 `completed`。最终直接回复：生成已完成、项目路径、目录结构、运行方式、基础验证摘要、已知风险。项目路径必须使用相对用户工作区的路径，例如 `workspace/${project_name}`，不要输出完整云端绝对路径。提示用户可在右侧工作区查看生成的项目文件。
@@ -139,14 +184,4 @@ workspace/${project_name}/
 - 工程实现受阻：更新 `workflow.json.implementation.status=blocked`，说明原因和可选方案。
 - 基础验证失败：记录失败命令、失败原因和是否阻塞交付。
 - 用户中途修改范围：更新受影响文档后从对应阶段继续。
-
-
-
-## 硬性规则
-
-- 开发类需求必须先进入本技能，且按五步流程推进。
-- 不调用 SubAgent；不使用 `Agent` / `task_status`。
-- 不写 `tasks.md`、`checklists.md` 或 `delivery.md`。
-- 需求澄清必须一次性卡片化展示。
-- 需求、架构、实现、基础验证和交付都必须更新 `workflow.json`，保证可断点续做。
 

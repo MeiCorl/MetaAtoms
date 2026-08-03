@@ -36,8 +36,8 @@ import (
 //     回顾里「虚构工具调用」污染决策。
 //  2. 【敏感约束】明确禁止记录 API key / 密码 / token 等凭证——这是第一道防线；
 //     sanitizer.go 的正则脱敏是第二道兜底。
-//  3. 【4 类定义 + 归属域】让模型判断「该归用户级还是项目级」，type 字段严格枚举，
-//     便于下游按归属域落盘到对应 memory 根目录。
+//  3. 【3 类用户级定义】让模型只产出用户角色、用户偏好、用户反馈，type 字段严格枚举，
+//     便于下游统一落盘到用户级 memory 根目录。
 //  4. 【索引比对去重】下文 user 消息会注入当前 MEMORY.md 索引，模型据此决定 new/update
 //     并给出目标 slug，消除「同主题重复新建」与「自相矛盾的记忆」。
 //  5. 【空数组语义】无值得记忆信息时返回 []，reviewer 据此不写任何文件。
@@ -48,24 +48,24 @@ const reviewSystemPrompt = `你是 MetaAtoms 的记忆回顾助手。你的任�
 - 不得记录任何敏感凭证：包括但不限于 API key、密钥、密码、token、私钥、.env 中的密钥、数据库连接串中的口令。遇到这类信息一律跳过，绝不写入记忆。
 - 决策必须客观、准确，只总结对话中确实出现的信息，不得脑补或推测。
 - 不要记录一次性、临时性、与长期工作无关的内容（如本次任务的临时细节、闲聊、一次性的报错堆栈、可直接从代码读到的明显事实）。
+- 不要记录项目级知识或参考资料；MetaAtoms 当前没有项目级记忆概念，自动学习只沉淀用户级记忆。
 - 若用户明确使用「记住」「以后」「后续」「默认」「每次」「总是」「都要」「约定」「偏好」「习惯」「必须」「不要」等表达来声明长期做事方式，且内容不属于敏感凭证或撤销/遗忘请求，则必须沉淀为长期记忆，不允许返回空数组。
 - 编码、行尾、缩进、命名规范、提交信息格式、回复语言、测试命令、工具使用习惯、代码风格、文件组织方式等长期约定均属于 user_preference。示例：「后续生成代码文件都使用 UTF-8 编码」应记录为 user_preference，而不是视为临时任务。
 
-【记忆分类与归属域】
-仅产出以下 4 类记忆，type 字段必须严格取以下枚举之一：
-1. user_preference（用户偏好）：用户明确表达的做事方式约定（如缩进风格、命名规范、提交信息格式）。归属用户级，跨所有项目生效。
-2. user_feedback（用户反馈）：用户对 Agent 输出的纠正性反馈与正确做法（如「上次漏了错误处理，应该在……处补上」）。归属用户级。
-3. project_knowledge（项目知识）：关于当前项目的技术架构、部署运维、内部约定等信息。归属项目级，跟随当前项目。
-4. reference（参考信息）：外部链接与资料（如某 API 文档地址、内部 wiki 链接、DB 使用手册位置）。归属项目级。
+【记忆分类】
+仅产出以下 3 类用户级记忆，type 字段必须严格取以下枚举之一：
+1. user_role（用户角色）：用户长期身份、职责、技能背景、工作领域或协作身份（如「用户是独立开发者，主要做 SaaS 产品」）。
+2. user_preference（用户偏好）：用户明确表达的长期做事方式约定（如缩进风格、命名规范、提交信息格式、回复语言、工具使用习惯）。
+3. user_feedback（用户反馈）：用户对 Agent 输出的纠正性反馈、评价和正确做法（如「上次漏了错误处理，应该在……处补上」）。
 
 【索引比对与去重】
-下文「当前已有记忆索引」会列出已有的记忆。若本轮要沉淀的信息与索引中某条【同主题】，请用 action=update 覆盖该条（给出其原有 slug），不要重复新建；若为新主题，用 action=new 并给出一个新的语义化 slug（仅小写字母、数字与连字符，如 indent-style、deploy-flow）。
+下文「当前已有记忆索引」会列出已有的记忆。若本轮要沉淀的信息与索引中某条【同主题】，请用 action=update 覆盖该条（给出其原有 slug），不要重复新建；若为新主题，用 action=new 并给出一个新的语义化 slug（仅小写字母、数字与连字符，如 user-role、indent-style）。
 
 【输出格式】
 只输出一个 JSON 数组。数组中每个元素结构如下：
 {
   "action": "new 或 update",
-  "type": "user_preference | user_feedback | project_knowledge | reference",
+  "type": "user_role | user_preference | user_feedback",
   "slug": "语义化文件名，仅小写字母、数字与连字符",
   "title": "记忆标题（单行简述）",
   "summary": "一句话简介，将出现在 MEMORY.md 索引中",
@@ -93,7 +93,9 @@ type ReviewInput struct {
 	ToolCallNames []string
 	// UserIndexText 用户级 MEMORY.md 索引文本（可空，缺失视为无用户级记忆）。
 	UserIndexText string
-	// ProjectIndexText 项目级 MEMORY.md 索引文本（可空，缺失视为无项目级记忆）。
+	// GlobalIndexText 全局基线 MEMORY.md 索引文本（可空，缺失视为无全局基线记忆）。
+	GlobalIndexText string
+	// ProjectIndexText 已废弃，仅为兼容旧调用保留；若传入，会按用户级记忆处理。
 	ProjectIndexText string
 }
 
@@ -118,7 +120,7 @@ const (
 type ReviewDecision struct {
 	// Action 动作类型，取 ReviewActionNew / ReviewActionUpdate 之一。
 	Action ReviewAction `json:"action"`
-	// Type 记忆分类，已过 IsValidType 校验（合法 4 类之一）。
+	// Type 记忆分类，已过 IsValidType 校验（合法 3 类之一）。
 	Type MemoryType `json:"type"`
 	// Slug 记忆文件名（不含 .md），已规范化 + 安全校验。
 	Slug string `json:"slug"`
@@ -132,7 +134,7 @@ type ReviewDecision struct {
 
 // renderReviewUserPrompt 把回顾输入快照渲染为回顾请求的 user 消息文本。
 //
-// 结构：【当前已有记忆索引】（项目级在前更相关 + 用户级）+ 【本轮对话快照】
+// 结构：【当前已有记忆索引】（用户级 + 全局基线）+ 【本轮对话快照】
 // （用户输入 / 工具调用摘要 / 最终回复）+ 结尾指令。
 //
 // 两级索引任一为空均优雅省略对应分段；两级都空时标注「暂无已有记忆」，
@@ -142,19 +144,27 @@ func renderReviewUserPrompt(in ReviewInput) string {
 	sb.WriteString(reviewSummaryPrefix)
 	sb.WriteString("\n\n【当前已有记忆索引】\n")
 
-	project := strings.TrimSpace(in.ProjectIndexText)
 	user := strings.TrimSpace(in.UserIndexText)
-	if project == "" && user == "" {
+	legacyProject := strings.TrimSpace(in.ProjectIndexText)
+	if legacyProject != "" {
+		if user == "" {
+			user = legacyProject
+		} else {
+			user = user + "\n\n" + legacyProject
+		}
+	}
+	global := strings.TrimSpace(in.GlobalIndexText)
+	if user == "" && global == "" {
 		sb.WriteString("（暂无已有记忆）\n")
 	} else {
-		if project != "" {
-			sb.WriteString("--- 项目级记忆（跟随当前项目）---\n")
-			sb.WriteString(project)
+		if user != "" {
+			sb.WriteString("--- 用户级记忆 ---\n")
+			sb.WriteString(user)
 			sb.WriteString("\n")
 		}
-		if user != "" {
-			sb.WriteString("--- 用户级记忆（跨所有项目）---\n")
-			sb.WriteString(user)
+		if global != "" {
+			sb.WriteString("--- 全局基线记忆 ---\n")
+			sb.WriteString(global)
 			sb.WriteString("\n")
 		}
 	}
@@ -180,7 +190,7 @@ var jsonFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*(.*?)```")
 //
 // 防御性降级策略（对应 checklist Task 4「非法 JSON 降级」「空数组语义」两项）：
 //   - 整体非 JSON / 数组缺失 / 解析失败：返回 nil + warn（reviewer 据此不写任何文件）；
-//   - 单条字段非法（action 非 new/update、type 非合法 4 类、slug/content 空）：
+//   - 单条字段非法（action 非 new/update、type 非合法 3 类、slug/content 空）：
 //     跳过该条 + warn，不影响其余合法条目；
 //   - 空数组 []：返回 nil（语义即「无值得记忆」）；
 //   - slug 经 normalizeSlug 规范化后仍非法（如纯符号）：跳过该条 + warn；
@@ -246,7 +256,7 @@ func extractJSONArray(raw string) string {
 }
 
 // validDecision 校验单条决策的字段合法性，非法时记 warn 并返回 false。
-// 校验项：action 枚举、type 合法 4 类、slug/content 非空。
+// 校验项：action 枚举、type 合法 3 类、slug/content 非空。
 func validDecision(d ReviewDecision) bool {
 	if d.Action != ReviewActionNew && d.Action != ReviewActionUpdate {
 		logger.Warn("autolearn: 跳过非法 action 的决策",

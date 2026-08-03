@@ -4,8 +4,8 @@
 // 的共同底座，本身不感知 LLM、不感知 prompt——纯 IO 子系统。
 //
 // 关键设计：
-//   - 分级存储：用户级（~/.metaatoms/memory/）与项目级（<cwd>/.metaatoms/memory/）
-//     两个独立根，由 NewStore 显式注入路径（主流程计算 home/cwd 后传入，便于测试注入
+//   - 分级存储：全局只读基线（~/.metaatoms/memory/）与用户级（~/.metaatoms/${user_id}/memory/）
+//     两个独立根，由 NewStore 显式注入路径（主流程计算 global/user root 后传入，便于测试注入
 //     临时目录，与 AgentsMDSource 的 HomeDirForTest 思路一致）。
 //   - 原子写：记忆文件与 MEMORY.md 均走「写临时文件 + os.Rename」覆盖，任意时刻崩溃
 //     磁盘上要么是完整的旧版、要么是完整的新版，不会出现半截损坏文件（高可用）。
@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	// indexFileName MEMORY.md 索引文件名（用户级与项目级各自一份）。
+	// indexFileName MEMORY.md 索引文件名（全局基线与用户级各自一份）。
 	indexFileName = "MEMORY.md"
 	// memoryFileExt 单条记忆文件后缀。
 	memoryFileExt = ".md"
@@ -68,10 +68,10 @@ var safeSlugRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 // 持有用户级与项目级两个根目录，无业务状态。所有路径由 (scope, slug) 现场计算，
 // 文件系统层面的并发安全由「原子写 + mu 保护增量读改写」共同保证。
 type Store struct {
-	// userRoot 用户级记忆根目录：~/.metaatoms/memory/。
+	// globalRoot 全局只读基线记忆根目录：~/.metaatoms/memory/。
+	globalRoot string
+	// userRoot 用户级记忆根目录：~/.metaatoms/${user_id}/memory/。
 	userRoot string
-	// projectRoot 项目级记忆根目录：<cwd>/.metaatoms/memory/。
-	projectRoot string
 	// mu 保护增量读-改-写操作（UpsertIndexEntry / RemoveIndexEntry）的原子性，
 	// 避免并发回顾各自读到旧索引后覆盖丢条目。WriteMemory / RewriteIndex 自身
 	// 原子写，无需持锁；ReadIndex 只读，无需持锁。
@@ -80,23 +80,23 @@ type Store struct {
 
 // NewStore 创建一个记忆存储器。
 //
-// userRoot / projectRoot 分别为用户级与项目级记忆根目录的绝对路径，由主流程
+// globalRoot / userRoot 分别为全局基线与用户级记忆根目录的绝对路径，由主流程
 // 计算后注入（便于测试用 t.TempDir() 注入隔离路径）。本构造不做目录存在性检查——
 // 惰性创建留到首次写入时按需 MkdirAll，允许在记忆目录尚未建立时即构造 store。
-func NewStore(userRoot, projectRoot string) *Store {
+func NewStore(globalRoot, userRoot string) *Store {
 	return &Store{
-		userRoot:    userRoot,
-		projectRoot: projectRoot,
+		globalRoot: globalRoot,
+		userRoot:   userRoot,
 	}
 }
 
 // RootFor 返回指定存储域的记忆根目录。
-// 未知 scope 一律按项目级处理（与 ScopeOf 对非法类型的兜底一致）。
+// 未知 scope 一律按用户级处理（与 ScopeOf 对非法类型的兜底一致）。
 func (s *Store) RootFor(scope StorageScope) string {
-	if scope == ScopeUser {
-		return s.userRoot
+	if scope == ScopeGlobal {
+		return s.globalRoot
 	}
-	return s.projectRoot
+	return s.userRoot
 }
 
 // UserMemoryRoot 返回用户级记忆根目录 <homeDir>/.metaatoms/memory。
@@ -112,7 +112,8 @@ func UserMemoryRoot(homeDir string) string {
 	return filepath.Join(homeDir, metaAtomsDirName, memoryDirName)
 }
 
-// ProjectMemoryRoot 返回项目级记忆根目录 <cwd>/.metaatoms/memory。
+// ProjectMemoryRoot 返回兼容旧调用的记忆根目录 <cwd>/.metaatoms/memory。
+// MetaAtoms 当前不再写入项目级记忆；新代码优先使用 UserMemoryRoot 或 tenantMemoryRoot。
 // cwd 为空时返回空串（同 UserMemoryRoot 的防御语义）。
 func ProjectMemoryRoot(cwd string) string {
 	if cwd == "" {
@@ -179,7 +180,7 @@ func parseIndex(content string) []IndexEntry {
 	return entries
 }
 
-// RewriteIndex 全量重写指定域的 MEMORY.md（按 4 类分块渲染），原子覆盖。
+// RewriteIndex 全量重写指定域的 MEMORY.md（按 3 类分块渲染），原子覆盖。
 //
 // 语义：
 //   - 目录惰性创建；
@@ -198,15 +199,15 @@ func (s *Store) RewriteIndex(scope StorageScope, entries []IndexEntry) error {
 	return nil
 }
 
-// renderIndex 把索引条目按 4 类分块渲染为 MEMORY.md 文本。
+// renderIndex 把索引条目按 3 类分块渲染为 MEMORY.md 文本。
 //
 // 格式：
 //
 //	## user_preference
 //	- [user_preference](indent-style.md)——使用4个空格代替TAB
 //
-//	## reference
-//	- [reference](db.md)——DB使用手册
+//	## user_feedback
+//	- [user_feedback](error-handling.md)——用户指出错误处理需要补齐
 //
 // 空 bucket（无条目的类型）不渲染标题，保持索引紧凑。
 // 非法条目（未知类型 / 非法 slug）被静默过滤，保证落盘索引只含可被安全回读的条目。
@@ -246,7 +247,7 @@ func renderIndex(entries []IndexEntry) string {
 	return strings.TrimRight(sb.String(), "\n") + "\n"
 }
 
-// RenderEntries 是 renderIndex 的公开包装：把一组索引条目按 4 类分块渲染为文本片段。
+// RenderEntries 是 renderIndex 的公开包装：把一组索引条目按 3 类分块渲染为文本片段。
 //
 // [Why] 供 sources 层（memory 索引注入 Source）等上层复用同一套渲染逻辑，避免在不同
 // 包重复实现而出现格式漂移。非法条目（未知类型 / 非法 slug）会被过滤；全部非法或为空

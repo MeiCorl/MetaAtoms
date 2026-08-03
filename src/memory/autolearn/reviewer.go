@@ -347,11 +347,11 @@ func (r *Reviewer) runReview(ctx context.Context, req ReviewRequest) {
 // 大不了模型把本轮信息当「新主题」处理（最坏只是可能产生重复条目，由后续 update 收敛）。
 func (r *Reviewer) buildReviewInput(ctx context.Context, req ReviewRequest) ReviewInput {
 	in := ReviewInput{
-		UserInput:        req.UserInput,
-		FinalReply:       req.FinalReply,
-		ToolCallNames:    req.ToolCallNames,
-		UserIndexText:    "",
-		ProjectIndexText: "",
+		UserInput:       req.UserInput,
+		FinalReply:      req.FinalReply,
+		ToolCallNames:   req.ToolCallNames,
+		UserIndexText:   "",
+		GlobalIndexText: "",
 	}
 
 	userEntries, err := r.store.ReadIndex(ScopeUser)
@@ -364,14 +364,16 @@ func (r *Reviewer) buildReviewInput(ctx context.Context, req ReviewRequest) Revi
 		in.UserIndexText = RenderEntries(userEntries)
 	}
 
-	projEntries, err := r.store.ReadIndex(ScopeProject)
-	if err != nil {
-		logger.WarnCtx(ctx, "autolearn: 读取项目级记忆索引失败，降级为空索引",
-			zap.String("sessionID", req.SessionID),
-			zap.Error(err),
-		)
-	} else {
-		in.ProjectIndexText = RenderEntries(projEntries)
+	if r.store.RootFor(ScopeGlobal) != "" && r.store.RootFor(ScopeGlobal) != r.store.RootFor(ScopeUser) {
+		globalEntries, err := r.store.ReadIndex(ScopeGlobal)
+		if err != nil {
+			logger.WarnCtx(ctx, "autolearn: 读取全局基线记忆索引失败，降级为空索引",
+				zap.String("sessionID", req.SessionID),
+				zap.Error(err),
+			)
+		} else {
+			in.GlobalIndexText = RenderEntries(globalEntries)
+		}
 	}
 
 	return in

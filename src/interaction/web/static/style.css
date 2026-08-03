@@ -2712,7 +2712,10 @@ body {
 .project-file-list {
     flex: 1;
     min-height: 0;
+    max-height: 100%;
     overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
     padding: var(--sp-2);
 }
 
@@ -2788,6 +2791,10 @@ body {
     display: flex;
     flex-direction: column;
     gap: var(--sp-3);
+    min-height: 0;
+    max-height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
     padding: var(--sp-4);
 }
 
@@ -5144,6 +5151,14 @@ body {
         grid-auto-columns: minmax(220px, 280px);
         overflow-x: auto;
         overflow-y: hidden;
+    }
+    .project-file-panel.is-workspace-root .project-file-list {
+        display: flex;
+        flex-direction: column;
+        grid-auto-flow: initial;
+        grid-auto-columns: initial;
+        overflow-x: hidden;
+        overflow-y: auto;
     }
     .project-panel-loading {
         min-height: 56px;
