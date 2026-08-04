@@ -1,6 +1,6 @@
 # MetaAtoms
 
-MetaAtoms 是一款面向多租户云端场景的 AI Coding Agent。它参考 [MeiCorl/CodePilot](https://github.com/MeiCorl/CodePilot) 的 Agent 内核链路，保留 LLM Provider、Conversation / ReAct Loop、Tool Registry、Tool Result 回灌、System Prompt 组合等核心抽象，并在此基础上增加 WebUI、登录认证、租户 runtime、租户级数据隔离、MCP / Skill / SubAgent 扩展、长期记忆、自我感知和配置热更新能力。
+MetaAtoms 是一款面向多租户云端场景的 AI Coding Agent。它围绕 LLM Provider、Conversation / ReAct Loop、Tool Registry、Tool Result 回灌、System Prompt 组合等核心抽象构建，并在此基础上提供 WebUI、登录认证、租户 runtime、租户级数据隔离、MCP / Skill / SubAgent 扩展、长期记忆、自我感知和配置热更新能力。
 
 项目目标是让用户从一个产品想法出发，通过多智能体协作完成需求澄清、架构规划、代码实现、测试、预览和源码交付。当前服务以 HTTP + WebSocket 形式提供浏览器交互入口，用户数据统一落在 `~/.metaatoms/<user_id>/` 下，工具执行与文件访问被限制在当前租户目录内。
 
@@ -8,7 +8,7 @@ MetaAtoms 是一款面向多租户云端场景的 AI Coding Agent。它参考 [M
 
 ## 项目架构
 
-MetaAtoms 的主链路延续 [MeiCorl/CodePilot](https://github.com/MeiCorl/CodePilot) 的设计：
+MetaAtoms 的主链路围绕 Agent 推理、工具调用和结果回灌展开：
 
 ```mermaid
 flowchart LR
@@ -104,7 +104,7 @@ sequenceDiagram
 
 ### 多租户数据隔离
 
-MetaAtoms 不再沿用 [MeiCorl/CodePilot](https://github.com/MeiCorl/CodePilot) 的“任意工作区路径”模型，而是固定每个用户的 runtime 根目录。登录后，服务端创建并使用 `~/.metaatoms/<user_id>/` 作为当前用户唯一工作目录。
+MetaAtoms 不采用“任意工作区路径”模型，而是固定每个用户的 runtime 根目录。登录后，服务端创建并使用 `~/.metaatoms/<user_id>/` 作为当前用户唯一工作目录。
 
 ```mermaid
 flowchart TB
@@ -298,6 +298,35 @@ flowchart LR
 ```
 
 `tools.enabled` 为空或省略表示启用所有已注册工具；非空时只暴露白名单内工具。工具名大小写敏感。
+
+### Slash 命令系统
+
+Slash 命令系统位于 `src/command/slash/`，用于承载用户在 WebUI 输入框中主动触发的快捷命令。它和 `tool.Tool` 都采用“元数据 + Execute”的注册表模式，但触发入口不同：`Tool` 由 LLM 通过 `tool_use` 调用，Slash 命令由用户输入 `/` 后从候选下拉中选择或直接提交。
+
+内置命令：
+
+- `/new`：新建一个会话
+- `/sessions`：查看历史会话列表
+- `/resume <id>`：恢复指定 ID 的会话
+- `/clear`：清空当前会话上下文
+- `/compact`：手动压缩上下文
+- `/skills`：查看当前可用 Skill 列表
+
+实现原理：
+
+- `SlashCommand` 接口定义 `Name`、`Description`、`NeedsArg`、`ArgHint`、`Category` 和 `Execute`，命令名含 `/` 前缀且全局唯一。
+- `slash.Registry` 负责命令注册、查找、列表快照和 `OnChange` 变化通知，注册顺序用于前端稳定渲染候选列表。
+- Web 层通过 `SlashCommandProvider` 最小接口消费命令清单，由 `src/main.go` 的 `slashAdapter` 把 `slash.Registry` 投影给 `web.Handler`，避免 `web` 与 `command/slash` 形成循环依赖。
+- WebSocket 打开时服务端主动推送 `slash_commands`；命令清单变化时推送 `slash_commands_updated`；前端据此刷新 `/` 候选下拉。
+- `category=client` 的命令由前端本地处理，例如 `/sessions`、`/skills` 打开对应列表视图；其他命令通过 `slash_command` 消息回到后端执行。
+- Skill 加载后会通过 `src/skill/adapter/slash.go` 自动适配为 `/<skill-name>` 命令，执行时把 Skill 内容和用户参数注入下一轮 `LeadUserMessage`，让用户可以手动选择某个工作流。
+
+配置方式：
+
+- Slash 命令没有独立配置开关，随对应能力注册。
+- 内置会话与上下文命令随 Web runtime 装配注册。
+- Skill 命令受 `skill.enabled`、Skill 加载结果和租户级资源热更新影响。
+- 命令列表会随租户 runtime 重建重新推送，确保全局/用户级 Skill 变化能反映到当前 WebUI。
 
 ### Skill 系统
 
