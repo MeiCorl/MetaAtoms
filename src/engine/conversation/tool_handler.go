@@ -53,6 +53,7 @@ const (
 	ToolEventStatusCompleted = "completed"
 	ToolEventStatusError     = "error"
 	ToolEventStatusAborted   = "aborted"
+	ToolEventStatusTimeout   = "timeout"
 )
 
 // ErrToolNotFound 在 Registry 中查不到工具名时返回。
@@ -307,19 +308,32 @@ func (h *ToolHandler) doExecute(ctx context.Context, toolUse llm.ToolUseBlock) (
 		zap.String("tool_use_id", toolUse.ID),
 	)
 
-	// 用 func() + recover 兜住工具内部 panic，转为 error 返回。
+	type toolExecResult struct {
+		output string
+		err    error
+	}
+	resultCh := make(chan toolExecResult, 1)
+	go func() {
+		var res toolExecResult
+		defer func() {
+			if r := recover(); r != nil {
+				res.err = fmt.Errorf("工具执行 panic: %v\n%s", r, debug.Stack())
+			}
+			resultCh <- res
+		}()
+		res.output, res.err = t.Execute(execCtx, toolUse.Input)
+	}()
+
 	var (
 		output string
 		err    error
 	)
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				err = fmt.Errorf("工具执行 panic: %v\n%s", r, debug.Stack())
-			}
-		}()
-		output, err = t.Execute(execCtx, toolUse.Input)
-	}()
+	select {
+	case res := <-resultCh:
+		output, err = res.output, res.err
+	case <-execCtx.Done():
+		err = execCtx.Err()
+	}
 
 	// 区分超时、取消、其它错误，便于上层选择 Status（aborted vs error）。
 	if err != nil {
@@ -350,6 +364,9 @@ func (h *ToolHandler) classifyStatus(err error, ctx context.Context) string {
 	}
 	if errors.Is(err, context.Canceled) {
 		return ToolEventStatusAborted
+	}
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		return ToolEventStatusTimeout
 	}
 	return ToolEventStatusError
 }

@@ -157,6 +157,7 @@
         sessionId: null,
         sessions: [],
         sessionsTableSessions: [],
+        deletedSessionIds: new Set(),
         messages: [],                  // [{ role, content, tool_call? }]  与 DOM 镜像
         agentStatus: 'idle',           // idle | thinking | tool_running | error
         ctx: { used: 0, limit: 100, percentLeft: 100 },
@@ -485,6 +486,7 @@
 
     function onWSClose() {
         state.wsReady = false;
+        state.deletedSessionIds.clear();
         state.projectDirPending = null;
         setProjectDirLoading(false);
         showProjectDirError('连接已断开，重连后可刷新用户文件。');
@@ -969,12 +971,16 @@
         finalizeAssistantMessage();
         const code = p?.code || 'unknown';
         const message = p?.message || '未知错误';
+        if (code === 'delete_session_failed') {
+            state.deletedSessionIds.clear();
+            sendWS(MsgType.ListSessions, {});
+        }
         renderErrorCard(code, message);
         renderSendButton();
     }
 
     function onSessionList(p) {
-        const sessions = p?.sessions || [];
+        const sessions = filterDeletedSessions(p?.sessions || []);
         state.sessions = sessions;
         renderSessionList(sessions);
         if (state.sessionsTableActive) {
@@ -1023,15 +1029,34 @@
         if (!p) return;
         const deletedID = String(p.deleted_id || p.deletedID || '').trim();
         if (deletedID) {
-            state.sessions = (state.sessions || []).filter(s => s && s.id !== deletedID);
-            renderSessionList(state.sessions);
-            if (state.sessionsTableActive) {
-                state.sessionsTableSessions = (state.sessionsTableSessions || []).filter(s => s && s.id !== deletedID);
-                renderSessionsTable(state.sessionsTableSessions);
-            }
+            removeSessionFromLocalLists(deletedID);
         }
         // 不论删除的是不是当前会话，都需要刷新一次列表
         sendWS(MsgType.ListSessions, {});
+    }
+
+    function sessionIDOf(session) {
+        return String(session?.id || '').trim();
+    }
+
+    function filterDeletedSessions(sessions) {
+        const list = Array.isArray(sessions) ? sessions : [];
+        if (!state.deletedSessionIds.size) return list;
+        return list.filter(s => !state.deletedSessionIds.has(sessionIDOf(s)));
+    }
+
+    function removeSessionFromLocalLists(id) {
+        const deletedID = String(id || '').trim();
+        if (!deletedID) return;
+
+        state.deletedSessionIds.add(deletedID);
+        state.sessions = (state.sessions || []).filter(s => sessionIDOf(s) !== deletedID);
+        renderSessionList(state.sessions);
+
+        if (state.sessionsTableActive) {
+            state.sessionsTableSessions = (state.sessionsTableSessions || []).filter(s => sessionIDOf(s) !== deletedID);
+            renderSessionsTable(state.sessionsTableSessions);
+        }
     }
 
     function onContextUsage(p) {
@@ -3588,7 +3613,20 @@
                 delBtn.addEventListener('click', (ev) => {
                     ev.stopPropagation();
                     ev.preventDefault();
-                    sendWS(MsgType.DeleteSession, { id: s.id });
+                    const sessionID = sessionIDOf(s);
+                    if (!sessionID) return;
+                    const previousSessions = state.sessions || [];
+                    const previousTableSessions = state.sessionsTableSessions || [];
+                    removeSessionFromLocalLists(sessionID);
+                    if (!sendWS(MsgType.DeleteSession, { id: sessionID })) {
+                        state.deletedSessionIds.delete(sessionID);
+                        state.sessions = previousSessions;
+                        state.sessionsTableSessions = previousTableSessions;
+                        renderSessionList(state.sessions);
+                        if (state.sessionsTableActive) {
+                            renderSessionsTable(state.sessionsTableSessions);
+                        }
+                    }
                 });
             }
             frag.appendChild(el);

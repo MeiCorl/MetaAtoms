@@ -72,6 +72,9 @@ type AgentLoopHooks struct {
 	TurnHooks
 	// OnIterationStart 在每轮迭代开始时回调，通知上层当前迭代进度
 	OnIterationStart func(iteration int, maxIterations int)
+	// OnHistoryChanged 在 AgentLoop 向 history 追加关键消息后回调。
+	// 交互层可用它做阶段性持久化，降低刷新/断连时的上下文丢失窗口。
+	OnHistoryChanged func()
 	// OnLoopDone 在循环结束时回调，携带最终结果
 	OnLoopDone func(result AgentLoopResult)
 }
@@ -148,6 +151,7 @@ func (m *ConversationManager) AgentLoop(
 				finalText = m.injectTerminationPrompt(ctx, provider, sp, toolSpecs, hooks,
 					"上下文空间即将耗尽，请立即总结当前进展并用简洁的语言回复用户。不要再调用任何工具。")
 				finalText = m.ensureNonEmptyReply(ctx, provider, sp, toolSpecs, hooks, finalText)
+				hooks.fireHistoryChanged()
 				result := AgentLoopResult{
 					FinalText:      finalText,
 					Iterations:     iteration,
@@ -195,6 +199,7 @@ func (m *ConversationManager) AgentLoop(
 			// 将取消标记写入 history，保持对话结构完整，
 			// 使后续用户发新问题时 LLM 知道前一个问题已被取消，只需关注最新问题
 			m.persistAbortedTurn(turnResult)
+			hooks.fireHistoryChanged()
 			result := AgentLoopResult{
 				FinalText:      finalText,
 				Iterations:     iteration,
@@ -220,6 +225,7 @@ func (m *ConversationManager) AgentLoop(
 			}
 			if turnResult.Text != "" {
 				m.AddAssistantMessage(turnResult.Text)
+				hooks.fireHistoryChanged()
 				m.dispatchHook(ctx, hook.EventPostMessage,
 					hook.NewMessageContext(hook.EventPostMessage, turnResult.Text, string(llm.RoleAssistant), m.sessionID, m.hookWorkdir, iteration))
 				finalText = turnResult.Text
@@ -230,6 +236,7 @@ func (m *ConversationManager) AgentLoop(
 					zap.Int("total_tool_calls", totalToolCalls),
 				)
 				finalText = m.ensureNonEmptyReply(ctx, provider, sp, toolSpecs, hooks, finalText)
+				hooks.fireHistoryChanged()
 			}
 			result := AgentLoopResult{
 				FinalText:      finalText,
@@ -258,6 +265,7 @@ func (m *ConversationManager) AgentLoop(
 			}
 		}
 		m.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: assistantContent})
+		hooks.fireHistoryChanged()
 		m.dispatchHook(ctx, hook.EventPostMessage,
 			hook.NewMessageContext(hook.EventPostMessage, messageText(llm.Message{Role: llm.RoleAssistant, Content: assistantContent}), string(llm.RoleAssistant), m.sessionID, m.hookWorkdir, iteration))
 
@@ -274,6 +282,7 @@ func (m *ConversationManager) AgentLoop(
 			}
 		}
 		m.AddMessage(llm.Message{Role: llm.RoleUser, Content: resultContent})
+		hooks.fireHistoryChanged()
 		m.dispatchHook(ctx, hook.EventIterationEnd,
 			hook.NewIterationContext(hook.EventIterationEnd, m.sessionID, m.hookWorkdir, iteration))
 
@@ -288,6 +297,7 @@ func (m *ConversationManager) AgentLoop(
 	finalText = m.injectTerminationPrompt(ctx, provider, sp, toolSpecs, hooks,
 		fmt.Sprintf("已达到最大迭代次数限制（%d 次），请立即总结当前进展并回复用户。不要再调用任何工具。", maxIter))
 	finalText = m.ensureNonEmptyReply(ctx, provider, sp, toolSpecs, hooks, finalText)
+	hooks.fireHistoryChanged()
 
 	result := AgentLoopResult{
 		FinalText:      finalText,
@@ -375,6 +385,12 @@ func (m *ConversationManager) ensureNonEmptyReply(
 func (h *AgentLoopHooks) fireIterationStart(iteration, maxIterations int) {
 	if h.OnIterationStart != nil {
 		h.OnIterationStart(iteration, maxIterations)
+	}
+}
+
+func (h *AgentLoopHooks) fireHistoryChanged() {
+	if h.OnHistoryChanged != nil {
+		h.OnHistoryChanged()
 	}
 }
 

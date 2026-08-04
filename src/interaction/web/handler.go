@@ -663,8 +663,9 @@ func (h *Handler) runStream(ctx context.Context, conn *websocket.Conn, userInput
 	}
 
 	// 构造 AgentLoopHooks：复用原有 TurnHooks 的 chunk/error 回调，
-	// 新增 OnIterationStart 推送迭代进度和 thinking 状态，
-	// 新增 OnLoopDone 在每次迭代结束时触发增量保存。
+	// OnIterationStart 推送迭代进度和 thinking 状态，
+	// OnHistoryChanged 在 tool_use/tool_result 等关键消息入 history 后立即增量保存，
+	// OnLoopDone 在结束时再做一次兜底保存。
 	loopHooks := conversation.AgentLoopHooks{
 		TurnHooks: conversation.TurnHooks{
 			OnStreamChunk: func(chunk llm.StreamChunk) {
@@ -695,6 +696,9 @@ func (h *Handler) runStream(ctx context.Context, conn *websocket.Conn, userInput
 				Current: iteration,
 				Max:     maxIterations,
 			})
+		},
+		OnHistoryChanged: func() {
+			h.saveCurrentSession()
 		},
 		// OnLoopDone 在 AgentLoop 结束后回调：
 		//   1. 增量保存会话，确保 stream_done 之前落盘；
@@ -2405,8 +2409,7 @@ func (h *Handler) sendProjectSearch(conn *websocket.Conn, p ProjectSearchPayload
 
 // mapToolEventStatus 把 conversation 包的内部工具事件状态枚举
 // 映射为 web 包对外的 ToolCallStatus* 常量（与前端约定保持一致）。
-// 对应关系：running/completed/error/aborted 直接透传；toolHandler 没有
-// 单独的 timeout 枚举，被归类为 error，前端在 status='error' 时可读 is_error 区分。
+// 对应关系：running/completed/error/aborted/timeout 直接透传。
 func mapToolEventStatus(s string) string {
 	switch s {
 	case conversation.ToolEventStatusRunning:
@@ -2417,6 +2420,8 @@ func mapToolEventStatus(s string) string {
 		return ToolCallStatusError
 	case conversation.ToolEventStatusAborted:
 		return ToolCallStatusAborted
+	case conversation.ToolEventStatusTimeout:
+		return ToolCallStatusTimeout
 	default:
 		return ToolCallStatusError
 	}

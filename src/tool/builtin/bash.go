@@ -26,6 +26,7 @@ const BashName = "Bash"
 const (
 	bashDefaultTimeoutSec = 30
 	bashMaxOutputBytes    = 1024 * 1024 // 1MB，单边 stdout/stderr 上限
+	bashCancelWaitDelay   = 2 * time.Second
 )
 
 // bashInput 是 Bash 工具的入参结构。
@@ -99,6 +100,7 @@ func (t *BashTool) Execute(parent context.Context, input json.RawMessage) (strin
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", in.Command)
 	}
+	configureCommandForCancellation(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedWriter{w: &stdout, n: bashMaxOutputBytes}
 	cmd.Stderr = &limitedWriter{w: &stderr, n: bashMaxOutputBytes}
@@ -113,6 +115,9 @@ func (t *BashTool) Execute(parent context.Context, input json.RawMessage) (strin
 		return "", fmt.Errorf("命令执行超时（> %s）", timeout)
 	}
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
 		// 退出码非零，但命令确实跑过——把 stdout/stderr 一起返回，标记为错误
 		out := decodeOutput(stdout.Bytes())
 		errOut := decodeOutput(stderr.Bytes())
