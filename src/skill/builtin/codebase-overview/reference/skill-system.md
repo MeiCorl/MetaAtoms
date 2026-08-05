@@ -16,7 +16,7 @@ Skill 系统位于第 3 层 工具层,是「可插拔的工作流能力模块」
 ## §2 核心数据结构
 
 - `Skill`(`src/skill/skill.go`)— 字段含 `Name / Description / Args / AllowedTools / Source / RootPath / body`
-- `Frontmatter`(`src/skill/loader/loader.go`)— YAML 头结构,字段 `Name / Description / Args / AllowedTools []string`
+- `frontmatterRead`(`src/skill/skill.go`)— SKILL.md YAML 头投影,字段 `Name / Description / Args / AllowedTools []string`
 - `Source` 常量— `SourceProject(1) / SourceUser(2) / SourceBuiltin(3)`,数值越小优先级越高;云端模式下 `SourceProject` 映射用户级，`SourceUser` 映射全局级。
 - `Registry`(`src/skill/registry.go`)— 内存合并注册表,字段 `byName map[string]*Skill / order []string / mu sync.RWMutex`
 - `ErrSkillConflict`(registry.go)— 同级别同名冲突错误,含 `Name / ExistingSource`
@@ -45,18 +45,17 @@ Skill 系统位于第 3 层 工具层,是「可插拔的工作流能力模块」
 
 ### 3.2 SKILL.md 解析
 
-`loader.ParseFile(path) (*Skill, error)`(`src/skill/loader/loader.go`):
+`parseFrontmatterLocal(path) (*Skill, error)`(`src/skill/scanner.go`) 是当前扫描路径使用的解析入口:
 
 1. `os.ReadFile(path)` 读文件
-2. `splitFrontmatter(raw, path)`(`loader.go`)按 `---` 拆 YAML 头 + 正文;首行非 `---` 或未闭合均返回 `*ErrMissingFrontmatter`
-3. `yaml.Unmarshal` 解析 frontmatter;YAML 错误返回 `*ErrYAML`(unwrap 后是 yaml.v3 原始错误)
-4. `validateFrontmatter(fm, path)`(`loader.go`)校验 `name / description` 非空,缺失返回 `*ErrMissingField`
-5. `skill.NewSkill(...)` 构造 `*Skill`(Source 默认填 SourceProject,scanner 按目录覆盖)
+2. `splitFrontmatterForRead(raw)`(`src/skill/skill.go`)按 `---` 拆 YAML 头 + 正文;首行非 `---` 或未闭合均返回 frontmatter 错误
+3. `parseFrontmatterText` 解析受控字段 `name / description / args / allowed-tools`
+4. `parseFrontmatterString` 校验 `name / description` 非空,缺失返回本地字段错误
+5. `NewSkill(...)` 构造 `*Skill`,Source 由 scanner 按目录来源覆盖
 
-[Why] Source 默认填 SourceProject:**Why** loader 阶段不区分目录来源,scanner 负责在注册时按目录覆盖;loader 与 source 决策解耦便于测试。
+[Why] 解析逻辑留在 skill 主包:**Why** 扫描、frontmatter 拆分和 Skill 构造都属于加载路径,放在同一包内可以避免循环依赖和额外胶水层。
 
 ### 3.3 Registry 合并规则
-
 `Registry.Register(s *Skill) error`(`src/skill/registry.go`)冲突规则:
 
 - **未发现同名** → 正常注册,append 到 `order`
@@ -151,8 +150,8 @@ main.go 装配时若 `cfg.Skill.Enabled = false`:
 | `src/skill/scanner.go` | `LoadAll` 三档扫描入口 |
 | `src/skill/scanner.go` | 内置级三段式 fallback |
 | `src/skill/scanner.go` | 启动期可观测性 warn |
-| `src/skill/loader/loader.go` | `ParseFile` SKILL.md 解析 |
-| `src/skill/loader/loader.go` | `splitFrontmatter` frontmatter 拆分 |
+| `src/skill/scanner.go` | `parseFrontmatterLocal` SKILL.md 解析入口 |
+| `src/skill/skill.go` | `splitFrontmatterForRead` frontmatter 拆分 |
 | `src/skill/registry.go` | `Registry` 内存合并注册表 |
 | `src/skill/registry.go` | `Register` 冲突规则 |
 | `src/skill/sources/skills_index.go` | `SkillsIndexSource` SP 索引注入 |

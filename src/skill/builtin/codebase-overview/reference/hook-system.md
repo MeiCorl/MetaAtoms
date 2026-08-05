@@ -2,7 +2,7 @@
 
 > 状态:**已实现** | 目标 Step:11 | 架构层:第 3 层 工具层
 
-Hook 系统让用户在 Agent 生命周期关键节点上配置自动化动作,用于日志、通知、格式化、提示词注入和轻量 LLM 检查。它属于工具层能力,通过集成胶水接入引擎层与交互层,核心 hook 包本身不依赖上层私有实现。
+Hook 系统让用户在 Agent 生命周期关键节点上配置自动化动作,用于日志、通知、格式化、提示词注入和轻量 LLM 检查。它属于工具层能力,由引擎层与交互层在各自生命周期节点直接派发事件,核心 hook 包本身不依赖上层私有实现。
 
 ## §1 能力边界
 
@@ -27,7 +27,7 @@ Hook 系统让用户在 Agent 生命周期关键节点上配置自动化动作,�
 | `src/hook/engine.go` | HookEngine 注册、调度、once/async、Stats、Shutdown |
 | `src/hook/loader.go` | 从 `config.HookConfig` 构造 Engine 并加载 entries |
 | `src/hook/prompt_sink.go` | prompt action 与对话消息注入之间的解耦接口 |
-| `src/hook/integration/` | Agent Loop / ToolHandler / Session / Compact / PromptSink 集成胶水 |
+| `src/engine/conversation/` + `src/interaction/web/` | Agent Loop / ToolHandler / Session / Compact / PromptSink 事件派发入口 |
 
 ## §3 配置到引擎的加载链路
 
@@ -93,14 +93,14 @@ type Executor interface {
 | 集成位置 | 文件 | 事件 |
 |----------|------|------|
 | 启动与退出 | `src/main.go` | `program_start` / `program_exit` |
-| Agent Loop | `src/engine/conversation/agent_loop.go` + `hook/integration/loop.go` | `iteration_start` / `iteration_end` / `error` |
+| Agent Loop | `src/engine/conversation/agent_loop.go` | `iteration_start` / `iteration_end` / `error` |
 | LLM 消息 | `src/engine/conversation/manager.go` | `pre_message` / `post_message` |
-| 工具执行 | `src/engine/conversation/tool_handler.go` + `hook/integration/tool.go` | `pre_tool_use` / `post_tool_use` |
-| 会话生命周期 | `src/interaction/web/handler.go` + `hook/integration/session.go` | `session_start` / `session_end` |
-| 上下文压缩 | `src/interaction/web/handler.go` + `hook/integration/compact.go` | `compact` |
-| prompt 注入 | `src/engine/conversation/manager.go` + `hook/integration/prompt.go` | PromptSink |
+| 工具执行 | `src/engine/conversation/tool_handler.go` | `pre_tool_use` / `post_tool_use` |
+| 会话生命周期 | `src/interaction/web/handler.go` | `session_start` / `session_end` |
+| 上下文压缩 | `src/interaction/web/handler.go` | `compact` |
+| prompt 注入 | `src/engine/conversation/manager.go` | PromptSink |
 
-每个集成点都通过胶水函数或局部 recover 防护,hook 报错不改变原有主流程行为。
+每个集成点都通过局部 recover 或错误隔离防护,hook 报错不改变原有主流程行为。
 
 ## §9 Prompt 自感知
 
@@ -113,7 +113,7 @@ Hook 入口提示归入 `src/engine/prompt/sources/codebase_awareness.go` 的 `C
 - `src/hook/*_test.go`:事件、上下文、插值、Engine once/async/Stats/Shutdown。
 - `src/hook/executor/*_test.go`:command/http/prompt/agent 执行器。
 - `src/hook/e2e_test.go`:真实 Engine 覆盖 command/http/prompt/agent、condition、once、async、错误隔离、12 类事件顺序。
-- `src/hook/integration/integration_smoke_test.go`:集成点触发与主流程不破坏。
+
 - `src/engine/prompt/sources/static_test.go`:SP 自感知内容与 token 上限。
 
 当前全包测试中若出现 `build/dist` internal package 导入限制或 `tool/builtin` 既有 `withSandedPath` 未定义,属于非 Hook 既有噪声;Hook 相关包应保持通过。

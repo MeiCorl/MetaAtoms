@@ -51,7 +51,7 @@ func (s Source) String() string {
 
 // Skill 是从 SKILL.md 解析得到的数据结构,贯穿 Skill 系统的全生命周期:
 //
-//   - 启动期:loader.ParseFile 解析 SKILL.md 后构造;
+//   - 启动期:scanner 解析 SKILL.md 后构造;
 //   - 运行期:registry 持有按 Source 排好序的 *Skill 列表;
 //   - 适配层:slash 适配器取 Name/Description/Args 拼命令,tool 适配器取 Body()
 //     作为 tool_result,prompt Source 取 Name/Description 拼索引。
@@ -61,7 +61,7 @@ func (s Source) String() string {
 //   - Description:必填,一句话用途,SP 索引展示;
 //   - Args:可选,用户参数提示(如 "<path>"),用于 /<skill> 命令的补全型交互;
 //   - AllowedTools:可选,可调用工具白名单(Step 11 Hook 系统接入);
-//   - Source:由 loader/registry 写入,标识来源级别;
+//   - Source:由 scanner/registry 写入,标识来源级别;
 //   - RootPath:Skill 目录绝对路径(用于 FullContent 二次读盘);
 //   - body:私有,SKILL.md 解析时的原始 markdown 正文(不含 frontmatter),
 //     通过 Body() 方法对外访问以封装重组逻辑。
@@ -104,7 +104,7 @@ const skillFileName = "SKILL.md"
 //	<body markdown>
 //
 // 该方法与 FullContent() 的区别:
-//   - Body() 使用启动期 loader 解析后缓存的 body(零 I/O,常驻内存);
+//   - Body() 使用启动期 scanner 解析后缓存的 body(零 I/O,常驻内存);
 //   - FullContent() 按 RootPath/SKILL.md 重新读盘,反映 SKILL.md 最新内容。
 //
 // use_skill 工具的 tool_result、slash 命令的 LeadUserMessage 都走 Body(),避免高频
@@ -113,12 +113,12 @@ func (s *Skill) Body() string {
 	return s.renderBody(s.truncateBody(s.body))
 }
 
-// NewSkill 由 loader 包(以及未来可能的 builtin 分发代码)调用的构造器,集中
+// NewSkill 由 scanner 和 builtin 分发代码调用,集中
 // 私有字段 body 的赋值,避免外部包通过字面量绕开字段访问限制。
 //
 // [Why] body 字段设计为 unexported 是为了让调用方只能走 Body() / FullContent()
-// 拿到重组后的 markdown;但 loader 等内部构造路径必须能写入 body。
-// 提供 NewSkill 而不是把 body 改成 exported,既保留封装,又满足 loader 的
+// 拿到重组后的 markdown;但 scanner 等内部构造路径必须能写入 body。
+// 提供 NewSkill 而不是把 body 改成 exported,既保留封装,又满足扫描器的
 // 「只在我这里构造」诉求。
 func NewSkill(name, description, args string, allowedTools []string, source Source, rootPath, body string) *Skill {
 	return &Skill{
@@ -223,7 +223,7 @@ func (s *Skill) truncateBody(body string) string {
 // 必须先按 --- ... --- 边界剥离 frontmatter 段,再交给 renderBody 重新组装,
 // 避免出现「frontmatter 重复」。
 //
-// 行为约定:与 loader.ParseFile 的 frontmatter 识别规则保持一致——
+// 行为约定:与 scanner 的 frontmatter 识别规则保持一致——
 //   - 首个非空行必须是 ---,否则视为无 frontmatter(整体作为 正文);
 //   - 找到第二个 --- 作为闭合;未闭合视为无 frontmatter(整体作为 正文)。
 //
@@ -247,14 +247,13 @@ func extractBody(raw string) string {
 	return raw
 }
 
-// splitFrontmatterForRead 复用 loader 相同规则的 frontmatter 拆分,但返回 skill 包内的
-// frontmatter 结构体而不是 loader.Frontmatter——避免 loader 包与 skill 包的循环依赖
-// (loader 已 import skill,skill 不能 import loader)。
+// splitFrontmatterForRead 复用 scanner 相同规则的 frontmatter 拆分,但返回 skill 包内的
+// frontmatter 结构体,避免把 YAML 解析细节暴露给调用方。
 //
 // [Why] FullContent 需要重新解析 frontmatter 但又不希望把 yaml.v3 直接依赖搬到
-// skill 主包——skill 主包应保持「数据层」纯净,YAML 解析由 loader 包实现。
-// 本函数对 loader.Frontmatter 做「字段名相同」的兼容:Name/Description/Args/AllowedTools
-// 与 loader.Frontmatter 完全一致(解析阶段两边字段结构同构),可以独立解析。
+// skill 主包——skill 主包应保持「数据层」纯净。
+// 本函数对 frontmatterRead 做「字段名相同」的兼容:Name/Description/Args/AllowedTools
+// 与 SKILL.md frontmatter 结构一致,可以独立解析。
 //
 // 为避免引入新的 YAML 依赖,splitFrontmatterForRead 直接解析 frontmatter 文本为
 // 简单 map[string]string / []string(只识别 4 个受控字段),并在解析失败时返回 error。
@@ -301,7 +300,7 @@ type frontmatterRead struct {
 
 // parseFrontmatterText 把 YAML 段解析为 frontmatterRead。
 //
-// [Why] 不引入 yaml.v3:Skill 主包保持「数据层纯净」,YAML 解析职责留给 loader 包。
+// [Why] 不引入 yaml.v3:Skill 主包保持「数据层纯净」。
 // 本函数是「已知 4 个标量字段」的轻量解析器,足以支撑 FullContent 的二次读盘需求。
 //
 // 支持语法:

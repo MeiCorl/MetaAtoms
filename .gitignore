@@ -1,3 +1,4 @@
 **/*.exe
+**/*_test.go
 .metaatoms-run.err
 .metaatoms-run.out

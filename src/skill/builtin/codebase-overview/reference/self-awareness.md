@@ -19,7 +19,7 @@
 - `CodebaseAwarenessSource`(`src/engine/prompt/sources/codebase_awareness.go`)— 代码自感知 Source,无状态 struct,固定返回 `codebaseAwarenessContent` 常量
 - `codebaseAwarenessContent`(codebase_awareness.go)— 固定字符串提示 MetaAtoms 架构/实现/Hook 入口看 `codebase-overview`,Hook 配置 schema 看 `config-management`,详细文档按需 `use_skill+ReadFile`
 - `Skill`(`src/skill/skill.go`)— Skill 数据结构(详见 skill-system.md)
-- `Frontmatter`(`src/skill/loader/loader.go`)— SKILL.md YAML 头
+- `frontmatterRead`(`src/skill/skill.go`)— SKILL.md YAML 头投影
 - `codebase-overview/SKILL.md`(`src/skill/builtin/codebase-overview/SKILL.md`)— 总索引文件(目录索引,不含实现细节)
 - `codebase-overview/reference/*.md`— 14 篇 module md(13 已实现 + 1 stub)
 

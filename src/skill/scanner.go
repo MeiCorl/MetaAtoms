@@ -83,12 +83,12 @@ func (i LoadIssue) Error() string {
 // 同级同名冲突:记 LoadIssue + 立即返回 *ErrSkillConflict,Registry 状态部分填充
 // (已 Register 的 Skill 保留)。
 //
-// [Why] 扫描 + 解析完全在 skill 主包内实现(不调用 loader.ParseFile):
-// skill 主包不能 import skill/loader(loader 已 import skill,会形成循环)。
-// parseFrontmatterLocal 是 loader.ParseFile 的行为等价的内联实现,
+// [Why] 扫描 + 解析完全在 skill 主包内实现:
+// 解析逻辑与目录扫描同处一包,避免跨包循环和额外胶水层。
+// parseFrontmatterLocal 是 SKILL.md frontmatter 解析的本地实现,
 // 保证 Task 2 范围内的端到端闭环(目录扫描 + 解析 + 注册三档合并)。
-// 后续若需要将 scanner 独立成子包(如 skill/scanner),再把 loader.ParseFile
-// 通过接口注入的方式替换回去。
+// 后续若需要将 scanner 独立成子包(如 skill/scanner),再把解析函数
+// 通过接口注入的方式替换出去。
 func LoadAll(workdir, homeDir, execDir string, maxBytes int) (*Registry, []LoadIssue, error) {
 	reg := NewRegistry()
 	var issues []LoadIssue
@@ -402,12 +402,12 @@ func scanLevelWithOptions(reg *Registry, rootDir string, src Source, maxBytes in
 	return nil
 }
 
-// parseFrontmatterLocal 在 skill 主包内解析 SKILL.md,行为等价于 loader.ParseFile。
+// parseFrontmatterLocal 在 skill 主包内解析 SKILL.md。
 //
-// [Why] 内联而非 import loader:loader 包已 import skill(用于 NewSkill 构造),
-// 若 skill 主包再 import loader 会形成循环。本函数复用 skill 包已有的
+// [Why] 内联解析:目录扫描、frontmatter 拆分和 NewSkill 构造都属于加载路径,
+// 放在同一包里可以复用 skill 包已有的
 // splitFrontmatterForRead / parseFrontmatterText / frontmatterRead,组合出
-// 与 loader.ParseFile 行为一致的 *Skill 构造流程:
+// *Skill 构造流程:
 //
 //	读盘 → splitFrontmatterForRead → trimSpace + 校验 name/description → NewSkill
 //
@@ -419,8 +419,8 @@ func scanLevelWithOptions(reg *Registry, rootDir string, src Source, maxBytes in
 //   - YAML 语法错(行内 ":" 缺失)→ ErrYAML 本地等价物;
 //   - 必填字段缺失 → ErrMissingField 本地等价物;
 //
-// 与 loader.ParseFile 的差异:
-//   - Source 字段:loader 默认填 SourceProject,本函数不预设(scanner 后续覆盖);
+// 解析细节:
+//   - Source 字段:本函数不预设(scanner 后续覆盖);
 //   - 错误类型:本函数返回本地定义的同名 struct(避免循环依赖),errors.As 仍可识别。
 func parseFrontmatterLocal(path string) (*Skill, error) {
 	data, err := os.ReadFile(path)
