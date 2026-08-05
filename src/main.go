@@ -62,6 +62,7 @@ import (
 	"github.com/metaatoms/metaatoms/src/subagent/background"
 	"github.com/metaatoms/metaatoms/src/subagent/definition"
 	subagentruntime "github.com/metaatoms/metaatoms/src/subagent/runtime"
+	subagentsources "github.com/metaatoms/metaatoms/src/subagent/sources"
 	subagenttool "github.com/metaatoms/metaatoms/src/subagent/tool"
 	"github.com/metaatoms/metaatoms/src/tool"
 	// import 触发 builtin 包的 init()，将 5 个内置工具以 cwd + 30s 兜底
@@ -1104,37 +1105,6 @@ func (m *tenantManager) buildRuntime(userID, fingerprint string) (*tenantRuntime
 		}
 	}
 
-	globalMemoryRoot := tenantMemoryRoot(m.baseDir)
-	userMemoryRoot := tenantMemoryRoot(userDir)
-	memoryReadStore := autolearn.NewStore(globalMemoryRoot, userMemoryRoot)
-	memoryWriteStore := autolearn.NewStore(userMemoryRoot, userMemoryRoot)
-	memEnabled := cfg.Memory.IsEnabled()
-	memoryReviewer := autolearn.NewReviewer(provider, memoryWriteStore, autolearn.ReviewerConfig{
-		Enabled:       memEnabled,
-		ReviewTimeout: 60 * time.Second,
-	})
-	agentsSource := sources.NewAgentsMDSource()
-	agentsSource.HomeDirForTest = filepath.Dir(m.baseDir)
-	agentsSource.GetwdForTest = func() (string, error) { return userDir, nil }
-	promptSources := []sources.Source{
-		sources.NewStaticSource(),
-		sources.NewEnvironmentSource(),
-		agentsSource,
-		sources.NewMemoryIndexSource(memoryReadStore, sources.MemoryIndexOptions{
-			Enabled:  memEnabled,
-			MaxLines: cfg.Memory.IndexMaxLines,
-			MaxBytes: cfg.Memory.IndexMaxBytes,
-		}),
-	}
-	if skillReg != nil {
-		promptSources = append(promptSources, skillsources.NewSkillsIndexSource(skillReg))
-	}
-	promptSources = append(promptSources,
-		sources.NewConfigAwarenessSource(),
-		sources.NewCodebaseAwarenessSource(),
-	)
-	promptBuilder := prompt.NewBuilder(promptSources...)
-
 	var subAgentDefinitions *definition.Registry
 	var subAgentRunner *subagentruntime.Runner
 	if cfg.SubAgent.IsEnabled() {
@@ -1163,6 +1133,40 @@ func (m *tenantManager) buildRuntime(userID, fingerprint string) (*tenantRuntime
 		subAgentDefinitions = defs
 		subAgentRunner = runner
 	}
+
+	globalMemoryRoot := tenantMemoryRoot(m.baseDir)
+	userMemoryRoot := tenantMemoryRoot(userDir)
+	memoryReadStore := autolearn.NewStore(globalMemoryRoot, userMemoryRoot)
+	memoryWriteStore := autolearn.NewStore(userMemoryRoot, userMemoryRoot)
+	memEnabled := cfg.Memory.IsEnabled()
+	memoryReviewer := autolearn.NewReviewer(provider, memoryWriteStore, autolearn.ReviewerConfig{
+		Enabled:       memEnabled,
+		ReviewTimeout: 60 * time.Second,
+	})
+	agentsSource := sources.NewAgentsMDSource()
+	agentsSource.HomeDirForTest = filepath.Dir(m.baseDir)
+	agentsSource.GetwdForTest = func() (string, error) { return userDir, nil }
+	promptSources := []sources.Source{
+		sources.NewStaticSource(),
+		sources.NewEnvironmentSource(),
+		agentsSource,
+		sources.NewMemoryIndexSource(memoryReadStore, sources.MemoryIndexOptions{
+			Enabled:  memEnabled,
+			MaxLines: cfg.Memory.IndexMaxLines,
+			MaxBytes: cfg.Memory.IndexMaxBytes,
+		}),
+	}
+	if skillReg != nil {
+		promptSources = append(promptSources, skillsources.NewSkillsIndexSource(skillReg))
+	}
+	if subAgentDefinitions != nil {
+		promptSources = append(promptSources, subagentsources.NewAgentsIndexSource(subAgentDefinitions))
+	}
+	promptSources = append(promptSources,
+		sources.NewConfigAwarenessSource(),
+		sources.NewCodebaseAwarenessSource(),
+	)
+	promptBuilder := prompt.NewBuilder(promptSources...)
 
 	handler := web.NewHandler(provider, sessMgr, cfg, defaultMaxRounds, promptBuilder, cfg.ContextWindowSize, userDir, toolRegistry, toolHandler, fileDiffStore)
 	handler.SetConnMgr(m.connMgr)

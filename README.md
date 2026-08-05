@@ -38,7 +38,7 @@ flowchart TB
     Tenant --> Tools["tool.Registry<br/>统一工具注册表"]
     Tenant --> Security["security<br/>Interceptor + Sandbox"]
 
-    Prompt --> Sources["Static / Env / AGENTS.md<br/>MemoryIndex / SkillsIndex<br/>ConfigAwareness / CodebaseAwareness"]
+    Prompt --> Sources["Static / Env / AGENTS.md<br/>MemoryIndex / SkillsIndex / AgentsIndex<br/>ConfigAwareness / CodebaseAwareness"]
     Tools --> Builtin["内置工具<br/>ReadFile / WriteFile / EditFile / Bash / Glob / Grep"]
     Tools --> Skill["Skill<br/>use_skill + slash"]
     Tools --> MCP["MCP Adapter<br/>stdio / HTTP"]
@@ -481,7 +481,8 @@ SubAgent 位于 `src/subagent/`，主 Agent 通过稳定的 `Agent` 工具把子
 
 - 角色定义是带 YAML frontmatter 的 Markdown 文件。
 - 加载顺序为内置、全局、用户级；用户级同名角色覆盖低优先级定义。
-- `Agent` 工具支持 defined 和 fork 两类运行方式。
+- `AgentsIndexSource` 会把可用角色的 `name`、`description`、来源、工具限制、模型、最大轮次和后台偏好作为轻量索引注入主 Agent 的 LeadUserMessage；角色正文 `SystemPrompt` 不注入主上下文。
+- `Agent` 工具支持 defined 和 fork 两类运行方式，主 Agent 根据索引选择 `role` 并通过该工具提交具体任务。
 - 前台等待超时后任务可进入后台，`task_status` 可查询状态。
 - 后台任务状态通过 WebSocket 推送，并在终态主动回灌主对话。
 
@@ -572,7 +573,8 @@ flowchart TB
 
 - `ConfigAwarenessSource` 注入配置自感知，指向 `config-management` Skill。
 - `CodebaseAwarenessSource` 注入代码自感知，指向 `codebase-overview` Skill。
-- 两个 Source 都是短文本，只告诉 Agent 应按需使用 Skill 和 reference 文档。
+- `AgentsIndexSource` 注入 SubAgent 角色轻量索引，让主 Agent 知道有哪些预置/自定义角色可选，但不暴露角色 `SystemPrompt` 正文。
+- 自感知 Source 都保持短文本，只告诉 Agent 应按需使用 Skill、reference 文档或 SubAgent 角色索引。
 - `config-management` 负责说明 `setting.json`、Skill、Agent、Memory 等配置。
 - `codebase-overview` 负责说明架构、会话、工具、MCP、权限、上下文、记忆、SubAgent 等实现。
 - 长文档采用“索引 + 按需子文档”二级加载，避免常驻占用上下文。
